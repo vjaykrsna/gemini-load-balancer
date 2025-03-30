@@ -32,6 +32,7 @@ import {
   SimpleGrid, // Or Flex if preferred
 } from "@chakra-ui/react";
 import AppLayout from "@/components/layout/AppLayout";
+import LogEntryItem from "@/components/logs/LogEntryItem"; // Import the new component
 
 type LogType = "requests" | "errors" | "keys";
 
@@ -58,6 +59,13 @@ const LogsPage = () => {
   const borderColor = useColorModeValue("gray.200", "gray.700"); // For the new card
 
   const fetchLogs = useCallback(async () => {
+    // Prevent automatic fetching for 'requests' tab unless triggered by button
+    if (logType === 'requests' && !requestLogsTriggered) {
+      setLogs([]); // Clear logs for requests tab if not triggered
+      setLoading(false); // Ensure loading spinner stops
+      return;
+    }
+
     setLoading(true);
     setError(null);
     try {
@@ -93,17 +101,12 @@ const LogsPage = () => {
     } finally {
       setLoading(false);
     }
-  }, [logType, limit, searchTerm, toast]); // Add dependencies
+  }, [logType, limit, searchTerm, toast, requestLogsTriggered]); // Add requestLogsTriggered dependency
 
-  // Fetch initial logs for the default tab ('keys')
+  // Fetch logs whenever fetchLogs function reference changes (due to dependencies like logType, limit, searchTerm, requestLogsTriggered changing)
   useEffect(() => {
     fetchLogs();
-  }, []); // Run only once on mount
-
-  // Remove the useEffect that depended on [fetchLogs]
-  // useEffect(() => {
-  //   fetchLogs();
-  // }, [fetchLogs]);
+  }, [fetchLogs]); // Correct dependency array
 
   // Fetch aggregate stats for error summary
   const fetchAppErrorStats = useCallback(async () => {
@@ -158,10 +161,10 @@ const LogsPage = () => {
     const types: LogType[] = ["requests", "errors", "keys"];
     const newType = types[index];
     setLogType(newType);
-    // Only fetch automatically for errors and keys tabs
-    if (newType === "errors" || newType === "keys") {
-      fetchLogs();
-    }
+    // Fetching is now handled by the useEffect hook reacting to logType change
+    // if (newType === "errors" || newType === "keys") {
+    //  fetchLogs(); // Removed direct call
+    // }
     // If switching to requests, reset the trigger *if* you want it to require button press every time
     // if (newType === 'requests') {
     //   setRequestLogsTriggered(false); // Optional: uncomment to force button press on each visit
@@ -270,18 +273,7 @@ const LogsPage = () => {
                       >
                         {logs.length > 0 ? (
                           logs.map((log, index) => (
-                            <Code
-                              display="block"
-                              whiteSpace="pre-wrap"
-                              key={index}
-                              p={2}
-                              mb={2}
-                              borderRadius="sm"
-                              bg={codeBg}
-                              color={codeColor}
-                            >
-                              {JSON.stringify(log, null, 2)}
-                            </Code>
+                            <LogEntryItem key={index} log={log} />
                           ))
                         ) : (
                           <Text>No request logs found matching criteria.</Text>
@@ -309,18 +301,7 @@ const LogsPage = () => {
                   >
                     {logs.length > 0 ? (
                       logs.map((log, index) => (
-                        <Code
-                          display="block"
-                          whiteSpace="pre-wrap"
-                          key={index}
-                          p={2}
-                          mb={2}
-                          borderRadius="sm"
-                          bg={codeBg}
-                          color={codeColor}
-                        >
-                          {JSON.stringify(log, null, 2)}
-                        </Code>
+                        <LogEntryItem key={index} log={log} />
                       ))
                     ) : (
                       <Text>No error logs found matching criteria.</Text>
@@ -346,18 +327,7 @@ const LogsPage = () => {
                   >
                     {logs.length > 0 ? (
                       logs.map((log, index) => (
-                        <Code
-                          display="block"
-                          whiteSpace="pre-wrap"
-                          key={index}
-                          p={2}
-                          mb={2}
-                          borderRadius="sm"
-                          bg={codeBg}
-                          color={codeColor}
-                        >
-                          {JSON.stringify(log, null, 2)}
-                        </Code>
+                        <LogEntryItem key={index} log={log} />
                       ))
                     ) : (
                       <Text>No key logs found matching criteria.</Text>
