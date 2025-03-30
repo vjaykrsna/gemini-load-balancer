@@ -21,6 +21,71 @@ async function ensureLogsDir() {
 
 // Call this function immediately
 ensureLogsDir().catch(console.error);
+// Custom format for console logging
+const customConsoleFormat = winston.format.printf(({ level, message, timestamp, stack, ...metadata }) => {
+  // Format timestamp nicely (e.g., locale string)
+  const ts = new Date(timestamp as string).toLocaleString();
+
+  // Extract context if provided, otherwise empty string
+  const context = metadata.context ? `[Context: ${metadata.context}]` : '';
+
+  // Process metadata for console summary
+  let summaryMeta = ''; // Holds concise info like URL, status, duration
+  let remainingMetaString = ''; // Holds stringified remaining metadata
+  try {
+    const metaToProcess = { ...metadata };
+    delete metaToProcess.context; // Context is already in firstLine
+
+    // --- Concise Summary Extraction ---
+    const req = metaToProcess.req as any; // Assuming structure like { method, url }
+    const res = metaToProcess.res as any; // Assuming structure like { statusCode }
+    const duration = metaToProcess.durationMs;
+
+    // Build summary string
+    if (req?.method && req?.url) {
+        summaryMeta += ` ${req.method} ${req.url}`;
+        delete metaToProcess.req; // Remove from remaining
+    }
+    if (res?.statusCode) {
+        summaryMeta += ` -> ${res.statusCode}`;
+        delete metaToProcess.res; // Remove from remaining
+    }
+     if (duration !== undefined && duration !== null) {
+        summaryMeta += ` (${duration}ms)`;
+        delete metaToProcess.durationMs; // Remove from remaining
+    }
+    // --- End Summary Extraction ---
+
+
+    // --- Omit/Summarize Large Fields for Console ---
+    const fieldsToOmit = ['req', 'res', 'request', 'response', 'body', 'data', 'requestBody', 'responseBody', 'headers']; // Add more as needed
+    fieldsToOmit.forEach(field => {
+        if (metaToProcess[field]) {
+             // You could add more sophisticated checks here, e.g., check size
+             metaToProcess[field] = `[${field} omitted]`; // Replace with placeholder
+        }
+    });
+    // --- End Omit/Summarize ---
+
+
+    // Stringify any *remaining* metadata
+    if (Object.keys(metaToProcess).length > 0) {
+      remainingMetaString = JSON.stringify(metaToProcess);
+    }
+  } catch (e) {
+    remainingMetaString = '[Error processing metadata]';
+  }
+
+  const firstLine = `${ts} [${level}] ${context}`.trim();
+  const messageLine = typeof message === 'string' ? message : JSON.stringify(message);
+
+  // Include stack trace for errors, indented
+  const stackLine = typeof stack === 'string' && stack ? `\nStack Trace:\n  ${stack.split('\n').join('\n  ')}` : '';
+
+  // Combine lines: First line + summary, message, remaining meta (if any), stack (if any), extra newline
+  return `${firstLine}${summaryMeta}\n${messageLine}${remainingMetaString ? `\nRemaining Metadata: ${remainingMetaString}` : ''}${stackLine}\n`;
+});
+
 
 // Configure transport for requests
 const requestTransport = new winston.transports.DailyRotateFile({
@@ -65,8 +130,9 @@ export const requestLogger = winston.createLogger({
     requestTransport,
     new winston.transports.Console({
       format: winston.format.combine(
-        winston.format.colorize(),
-        winston.format.simple()
+        winston.format.timestamp(), // Add timestamp
+        winston.format.colorize(), // Keep colors
+        customConsoleFormat       // Use our new format
       )
     })
   ]
@@ -77,8 +143,9 @@ const errorLogger = winston.createLogger({
     errorTransport,
     new winston.transports.Console({
       format: winston.format.combine(
-        winston.format.colorize(),
-        winston.format.simple()
+        winston.format.timestamp(), // Add timestamp
+        winston.format.colorize(), // Keep colors
+        customConsoleFormat       // Use our new format
       )
     })
   ]
@@ -89,8 +156,9 @@ const keyLogger = winston.createLogger({
     keyTransport,
     new winston.transports.Console({
       format: winston.format.combine(
-        winston.format.colorize(),
-        winston.format.simple()
+        winston.format.timestamp(), // Add timestamp
+        winston.format.colorize(), // Keep colors
+        customConsoleFormat       // Use our new format
       )
     })
   ]
