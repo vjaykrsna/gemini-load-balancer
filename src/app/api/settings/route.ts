@@ -28,6 +28,7 @@ export async function POST(request: NextRequest) {
       maxFailureCount: validateNumber(body.maxFailureCount, currentSettings.maxFailureCount, 1, 20),
       rateLimitCooldown: validateNumber(body.rateLimitCooldown, currentSettings.rateLimitCooldown, 10, 3600),
       logRetentionDays: validateNumber(body.logRetentionDays, currentSettings.logRetentionDays, 1, 90),
+      keyRotationDelaySeconds: validateNumber(body.keyRotationDelaySeconds, currentSettings.keyRotationDelaySeconds, 0, 300),
     };
     
     await writeSettings(newSettings);

@@ -8,6 +8,7 @@ export interface Settings {
   maxFailureCount: number;
   rateLimitCooldown: number; // Cooldown in seconds
   logRetentionDays: number;
+  keyRotationDelaySeconds: number; // Delay in seconds before rotating after rate limit
 }
 
 // Define and export default settings
@@ -16,6 +17,7 @@ const DEFAULT_SETTINGS: Settings = {
   maxFailureCount: 5,
   rateLimitCooldown: 60, // Default 1 minute cooldown
   logRetentionDays: 14, // Default 14 days retention
+  keyRotationDelaySeconds: 5, // Default 5 seconds delay
 };
 
 // Path to settings file

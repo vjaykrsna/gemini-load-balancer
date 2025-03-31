@@ -44,6 +44,7 @@ interface Settings {
   maxFailureCount: number;
   rateLimitCooldown: number;
   logRetentionDays: number;
+  keyRotationDelaySeconds: number;
 }
 
 export default function SettingsPage() {
@@ -52,6 +53,7 @@ export default function SettingsPage() {
     maxFailureCount: 5,
     rateLimitCooldown: 60,
     logRetentionDays: 14,
+    keyRotationDelaySeconds: 5, // Default value, will be updated on fetch
   });
   
   const [isLoading, setIsLoading] = useState(true);
@@ -291,6 +293,26 @@ export default function SettingsPage() {
                 </NumberInput>
                 <Text fontSize="sm" color="gray.500" mt={1}>
                   Default cooldown period when rate limit is hit (if not specified by API)
+
+
+              <FormControl mb={4}>
+                <FormLabel>Key Rotation Delay (seconds)</FormLabel>
+                <NumberInput
+                  value={settings.keyRotationDelaySeconds}
+                  onChange={(_, value) => setSettings({ ...settings, keyRotationDelaySeconds: value })}
+                  min={0} // Allow 0 for no delay
+                  max={300} // Set a reasonable max, e.g., 5 minutes
+                >
+                  <NumberInputField />
+                  <NumberInputStepper>
+                    <NumberIncrementStepper />
+                    <NumberDecrementStepper />
+                  </NumberInputStepper>
+                </NumberInput>
+                <Text fontSize="sm" color="gray.500" mt={1}>
+                  Delay after a key hits rate limit before trying the next key.
+                </Text>
+              </FormControl>
                 </Text>
               </FormControl>
             </CardBody>

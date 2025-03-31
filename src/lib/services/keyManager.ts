@@ -172,6 +172,20 @@ class KeyManager {
         });
 
         await this.currentKey.save();
+
+        // --- Add delay before clearing currentKey to force rotation ---
+        const delaySeconds = settings.keyRotationDelaySeconds || 0;
+        if (delaySeconds > 0) {
+          logKeyEvent('Rate Limit Delay Start', {
+             keyId: this.currentKey._id,
+             delaySeconds: delaySeconds,
+             reason: 'Global Rate Limit (429)'
+          });
+          await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
+          logKeyEvent('Rate Limit Delay End', { keyId: this.currentKey._id });
+        }
+        // --- End Delay ---
+
         // Clear current key to force rotation
         this.currentKey = null;
         return true; // Indicate it was a rate limit error
@@ -249,6 +263,22 @@ class KeyManager {
                dailyRequestsUsed: this.currentKey.dailyRequestsUsed,
                dailyRateLimit: limit
              });
+             // Fetch settings again for the delay value
+             const settings = await readSettings();
+
+             // --- Add delay before clearing currentKey to force rotation ---
+             const delaySeconds = settings.keyRotationDelaySeconds || 0;
+             if (delaySeconds > 0 && this.currentKey) { // Add null check for safety
+               logKeyEvent('Rate Limit Delay Start', {
+                  keyId: this.currentKey._id,
+                  delaySeconds: delaySeconds,
+                  reason: 'Daily Rate Limit'
+               });
+               await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
+               logKeyEvent('Rate Limit Delay End', { keyId: this.currentKey._id });
+             }
+             // --- End Delay ---
+
              this.currentKey.isDisabledByRateLimit = true;
              await this.currentKey.save();
              this.currentKey = null; // Clear the invalid key
