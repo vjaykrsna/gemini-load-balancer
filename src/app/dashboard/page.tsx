@@ -34,8 +34,9 @@ export default function Dashboard() {
   const [stats, setStats] = useState({
     totalKeys: 0,
     activeKeys: 0,
-    totalRequests: 0, // Last 24h
-    totalRequestsToday: 0, // Since midnight
+    totalRequests: 0, // Lifetime total from DB
+    totalRequestsToday: 0, // Since midnight from DB
+    totalRequests24h: 0, // Last 24h from logs
     errorRate: 0
   });
 
@@ -64,18 +65,22 @@ export default function Dashboard() {
       // Calculate stats
       const totalKeys = keysData.length;
       const activeKeys = keysData.filter((key: any) => key.isActive).length;
-      const totalRequests = statsData.totalRequests || 0;
-      // Use apiKeyErrors for the dashboard error rate stat
-      const errorRate = statsData.totalRequests > 0 && statsData.apiKeyErrors !== undefined
-        ? ((statsData.apiKeyErrors / statsData.totalRequests) * 100).toFixed(1)
+      const totalRequests = statsData.totalRequests || 0; // Lifetime
+      const totalRequestsToday = statsData.totalRequestsToday || 0; // Since midnight
+      const totalRequests24h = statsData.totalRequests24h || 0; // Last 24h from logs
+      
+      // Calculate error rate based on 24h requests if available, otherwise lifetime
+      const relevantTotalRequestsForErrorRate = totalRequests24h > 0 ? totalRequests24h : totalRequests;
+      const errorRate = relevantTotalRequestsForErrorRate > 0 && statsData.apiKeyErrors !== undefined
+        ? ((statsData.apiKeyErrors / relevantTotalRequestsForErrorRate) * 100).toFixed(1)
         : 0;
-      const totalRequestsToday = statsData.totalRequestsToday || 0; // Get today's count
       
       setStats({
         totalKeys,
         activeKeys,
-        totalRequests,
-        totalRequestsToday, // Set today's count in state
+        totalRequests, // Lifetime
+        totalRequestsToday, // Since midnight
+        totalRequests24h, // Last 24h
         errorRate: parseFloat(errorRate as string)
       });
     } catch (err: any) {
@@ -122,7 +127,7 @@ export default function Dashboard() {
         </Alert>
       )}
 
-      <SimpleGrid columns={{ base: 1, md: 2, lg: 5 }} spacing={6} mb={8}> {/* Changed lg from 4 to 5 */}
+      <SimpleGrid columns={{ base: 1, md: 2, lg: 3, xl: 6 }} spacing={6} mb={8}> {/* Adjusted grid columns */}
         <Card bg={bgColor} borderWidth="1px" borderColor={borderColor} borderRadius="lg" shadow="sm">
           <CardBody>
             <Flex align="center" mb={2}>
@@ -148,19 +153,19 @@ export default function Dashboard() {
             </Flex>
           </CardBody>
         </Card>
-
-        <Card bg={bgColor} borderWidth="1px" borderColor={borderColor} borderRadius="lg" shadow="sm">
-          <CardBody>
-            <Flex align="center" mb={2}>
-              <Icon as={FiCpu} boxSize={6} color="purple.500" mr={2} />
-              <Stat>
-                <StatLabel>Total Requests</StatLabel>
-                <StatNumber>{isLoading ? '-' : stats.totalRequests}</StatNumber>
-                <StatHelpText>Last 24 Hours</StatHelpText>
-              </Stat>
-            </Flex>
-          </CardBody>
-        </Card>
+{/* New Card for Total Requests (Last 24 Hours) */}
+<Card bg={bgColor} borderWidth="1px" borderColor={borderColor} borderRadius="lg" shadow="sm">
+  <CardBody>
+    <Flex align="center" mb={2}>
+      <Icon as={FiCpu} boxSize={6} color="cyan.500" mr={2} /> {/* Different color */}
+      <Stat>
+        <StatLabel>Total Requests (24h)</StatLabel>
+        <StatNumber>{isLoading ? '-' : stats.totalRequests24h}</StatNumber>
+        <StatHelpText>Last 24 Hours (Logs)</StatHelpText>
+      </Stat>
+    </Flex>
+  </CardBody>
+</Card>
 
         {/* New Card for Total Requests Today */}
         <Card bg={bgColor} borderWidth="1px" borderColor={borderColor} borderRadius="lg" shadow="sm">
@@ -168,28 +173,40 @@ export default function Dashboard() {
             <Flex align="center" mb={2}>
               <Icon as={FiCpu} boxSize={6} color="teal.500" mr={2} /> {/* Different color/icon? */}
               <Stat>
-                <StatLabel>Total Requests Today</StatLabel>
+                <StatLabel>Total Requests (Today)</StatLabel>
                 <StatNumber>{isLoading ? '-' : stats.totalRequestsToday}</StatNumber>
-                <StatHelpText>Since Midnight</StatHelpText>
+                <StatHelpText>Since Midnight (DB)</StatHelpText>
               </Stat>
             </Flex>
           </CardBody>
         </Card>
+{/* Card for Total Requests (Lifetime) - Updated Label */}
+<Card bg={bgColor} borderWidth="1px" borderColor={borderColor} borderRadius="lg" shadow="sm">
+  <CardBody>
+    <Flex align="center" mb={2}>
+      <Icon as={FiCpu} boxSize={6} color="purple.500" mr={2} />
+      <Stat>
+        <StatLabel>Total Requests (Lifetime)</StatLabel>
+        <StatNumber>{isLoading ? '-' : stats.totalRequests}</StatNumber>
+        <StatHelpText>All Time (DB)</StatHelpText>
+      </Stat>
+    </Flex>
+  </CardBody>
+</Card>
 
-        <Card bg={bgColor} borderWidth="1px" borderColor={borderColor} borderRadius="lg" shadow="sm">
-          <CardBody>
-            <Flex align="center" mb={2}>
-              <Icon as={FiAlertCircle} boxSize={6} color="orange.500" mr={2} />
-              <Stat>
-                <StatLabel>Error Rate</StatLabel>
-                <StatNumber>{isLoading ? '-' : `${stats.errorRate}%`}</StatNumber>
-                <StatHelpText>Last 24 Hours</StatHelpText>
-              </Stat>
-            </Flex>
-          </CardBody>
-        </Card>
-      </SimpleGrid>
-      {/* Adjusted SimpleGrid columns to accommodate the new card if needed, e.g., lg: 5? Or let it wrap */}
+<Card bg={bgColor} borderWidth="1px" borderColor={borderColor} borderRadius="lg" shadow="sm">
+  <CardBody>
+    <Flex align="center" mb={2}>
+      <Icon as={FiAlertCircle} boxSize={6} color="orange.500" mr={2} />
+      <Stat>
+        <StatLabel>API Key Error Rate</StatLabel>
+        <StatNumber>{isLoading ? '-' : `${stats.errorRate}%`}</StatNumber>
+        <StatHelpText>Last 24 Hours (Logs)</StatHelpText>
+      </Stat>
+    </Flex>
+  </CardBody>
+</Card>
+</SimpleGrid>
 
       <Card bg={bgColor} borderWidth="1px" borderColor={borderColor} borderRadius="lg" shadow="sm" mb={8}>
         <CardHeader>

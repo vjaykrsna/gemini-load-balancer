@@ -34,7 +34,7 @@ import {
   Spinner,
   SimpleGrid, // Import SimpleGrid
 } from '@chakra-ui/react';
-import { FiSave, FiRefreshCw } from 'react-icons/fi';
+import { FiSave, FiRefreshCw, FiDownload, FiUpload } from 'react-icons/fi';
 import AppLayout from '@/components/layout/AppLayout'; // Import AppLayout
 import { useContext } from 'react';
 import { ThemeContext } from '@/contexts/ThemeContext';
@@ -58,8 +58,11 @@ export default function SettingsPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isSaved, setIsSaved] = useState(false);
-  const [isCleaning, setIsCleaning] = useState(false); // State for cleanup button
-  const [cleanupResult, setCleanupResult] = useState<string | null>(null); // State for cleanup result message
+  const [isCleaning, setIsCleaning] = useState(false);
+  const [cleanupResult, setCleanupResult] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null); // State for import file
+  const [isImporting, setIsImporting] = useState(false); // State for import button
+  const [importResult, setImportResult] = useState<{ message: string; details?: any } | null>(null); // State for import result message
   
   const toast = useToast();
   const { colorMode, toggleColorMode } = useContext(ThemeContext);
@@ -182,6 +185,86 @@ export default function SettingsPage() {
     }
   }, [toast]);
 
+  // Handler for file input change
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files && event.target.files[0]) {
+      setSelectedFile(event.target.files[0]);
+      setImportResult(null); // Clear previous results
+    } else {
+      setSelectedFile(null);
+    }
+  };
+
+  // Handler for triggering full data export
+  const handleExportData = () => {
+    // Simply navigate to the new data export endpoint
+    window.location.href = '/api/admin/data/export';
+  };
+
+  // Handler for importing full data (OVERWRITES EXISTING DATA)
+  const handleImportData = useCallback(async () => {
+    if (!selectedFile) {
+      toast({
+        title: 'No file selected',
+        description: 'Please select a JSON file to import.',
+        status: 'warning',
+        duration: 3000,
+        isClosable: true,
+      });
+      return;
+    }
+
+    setIsImporting(true);
+    setImportResult(null);
+    setError(null); // Clear previous general errors
+
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+
+    try {
+      const response = await fetch('/api/admin/data/import', {
+        method: 'POST',
+        body: formData, // Send as FormData
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || data.message || 'Data import failed');
+      }
+
+      setImportResult({ message: data.message, details: data }); // Store full result details
+      toast({
+        title: 'Data Import Complete',
+        // Adjust description based on the new API response structure if needed
+        description: data.message || `Import finished. Keys: ${data.results?.keys}, Settings: ${data.results?.settings}, Logs: ${data.results?.logs}. Errors: ${data.results?.errors?.length || 0}`,
+        status: data.results?.errors?.length > 0 ? 'warning' : 'success',
+        duration: 7000, // Longer duration to read details
+        isClosable: true,
+      });
+      // Optionally refresh keys list if displayed on this page or redirect
+
+    } catch (err: any) {
+      setImportResult({ message: `Error: ${err.message}` });
+      setError(`Import Error: ${err.message}`); // Show error specifically
+      toast({
+        title: 'Data Import Failed',
+        description: err.message || 'Could not import data from file.',
+        status: 'error',
+        duration: 5000,
+        isClosable: true,
+      });
+    } finally {
+      setIsImporting(false);
+      setSelectedFile(null); // Clear file input after attempt
+      // Clear the actual file input element value
+      const fileInput = document.getElementById('import-file-input') as HTMLInputElement;
+      if (fileInput) {
+        fileInput.value = '';
+      }
+    }
+  }, [selectedFile, toast]);
+
   if (isLoading) {
     return (
       <AppLayout> {/* Use AppLayout for loading state */}
@@ -230,7 +313,7 @@ export default function SettingsPage() {
           </Alert>
         )}
 
-        <SimpleGrid columns={{ base: 1, md: 2 }} gap={6}> {/* Replace Grid with SimpleGrid */}
+        <SimpleGrid columns={{ base: 1, lg: 2 }} gap={6} mb={6}> {/* Adjusted grid columns and added margin */}
           <Card bg={cardBg} borderWidth="1px" borderColor={borderColor} borderRadius="lg" shadow="sm">
             <CardHeader>
               <Heading size="md">API Key Settings</Heading>
@@ -354,6 +437,93 @@ export default function SettingsPage() {
            </CardBody>
          </Card>
        </SimpleGrid>
+
+       {/* Import/Export Card */}
+       <Card bg={cardBg} borderWidth="1px" borderColor={borderColor} borderRadius="lg" shadow="sm" mb={6}>
+         <CardHeader>
+           <Heading size="md">Backup & Restore Data</Heading>
+         </CardHeader>
+         <Divider borderColor={borderColor} />
+         <CardBody>
+           <SimpleGrid columns={{ base: 1, md: 2 }} gap={6}>
+             {/* Export Section */}
+             <Box>
+               <Heading size="sm" mb={2}>Backup All Data</Heading>
+               <Text fontSize="sm" color="gray.500" mb={3}>
+                 Download a JSON file containing all API Keys, Settings, and Request Log history. Useful for backups or migration.
+               </Text>
+               <Button
+                 leftIcon={<FiDownload />}
+                 colorScheme="green"
+                 variant="outline"
+                 onClick={handleExportData}
+               >
+                 Backup All Data
+               </Button>
+             </Box>
+
+             {/* Import Section */}
+             <Box>
+               <Heading size="sm" mb={2}>Restore Data from Backup</Heading>
+               <Alert status="warning" mb={3} borderRadius="md" fontSize="sm">
+                 <AlertIcon boxSize="16px" />
+                 <Box>
+                   <AlertTitle fontSize="sm">Warning!</AlertTitle>
+                   <AlertDescription>Restoring will **overwrite** all current API Keys, Settings, and Request Logs with the content from the backup file.</AlertDescription>
+                 </Box>
+               </Alert>
+               <Text fontSize="sm" color="gray.500" mb={3}>
+                 Upload a previously exported JSON backup file.
+               </Text>
+               <FormControl>
+                 <FormLabel htmlFor="import-file-input" srOnly>Select JSON file</FormLabel>
+                 <Input
+                   id="import-file-input"
+                   type="file"
+                   accept=".json"
+                   onChange={handleFileChange}
+                   mb={3}
+                   size="sm"
+                   variant="outline"
+                   p={1} // Adjust padding for file input
+                 />
+                 <Button
+                   leftIcon={<FiUpload />}
+                   colorScheme="blue"
+                   variant="outline"
+                   onClick={handleImportData}
+                   isLoading={isImporting}
+                   loadingText="Restoring..."
+                   isDisabled={!selectedFile || isImporting}
+                   size="sm"
+                 >
+                   Restore from File
+                 </Button>
+               </FormControl>
+               {importResult && (
+                 <Box mt={3} p={3} borderWidth="1px" borderRadius="md" borderColor={importResult.message.startsWith('Error:') ? 'red.300' : 'green.300'} bg={importResult.message.startsWith('Error:') ? 'red.50' : 'green.50'}>
+                   <Text fontSize="sm" fontWeight="bold" color={importResult.message.startsWith('Error:') ? 'red.600' : 'green.600'}>
+                     {importResult.message}
+                   </Text>
+                   {importResult.details && (
+                     <Text fontSize="xs" mt={1}>
+                       Keys: {importResult.details?.results?.keys ?? 'N/A'},
+                       Settings: {importResult.details?.results?.settings ?? 'N/A'},
+                       Logs: {importResult.details?.results?.logs ?? 'N/A'},
+                       Errors: {importResult.details?.results?.errors?.length ?? 0}
+                       {importResult.details?.results?.errors?.length > 0 && (
+                         <Tooltip label={importResult.details.results.errors.join('\n')} placement="top">
+                           <Text as="span" ml={1} textDecoration="underline" cursor="help">(details)</Text>
+                         </Tooltip>
+                       )}
+                     </Text>
+                   )}
+                 </Box>
+               )}
+             </Box>
+           </SimpleGrid>
+         </CardBody>
+       </Card>
 
         <Flex justify="flex-end" mt={6}>
           <Button

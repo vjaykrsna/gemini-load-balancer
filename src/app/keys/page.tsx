@@ -50,7 +50,8 @@ export default function KeysPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [newKey, setNewKey] = useState('');
-  const [newKeyName, setNewKeyName] = useState(''); // Add state for name
+  const [newKeyName, setNewKeyName] = useState('');
+  const [newKeyDailyRateLimit, setNewKeyDailyRateLimit] = useState(''); // State for daily rate limit
   const { isOpen, onOpen, onClose } = useDisclosure();
   const toast = useToast();
 
@@ -94,7 +95,11 @@ export default function KeysPage() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ key: newKey, name: newKeyName }), // Send name
+        body: JSON.stringify({
+          key: newKey,
+          name: newKeyName,
+          dailyRateLimit: newKeyDailyRateLimit.trim() === '' ? null : newKeyDailyRateLimit // Send null if empty, otherwise the value
+        }),
       });
 
       if (!response.ok) {
@@ -111,7 +116,8 @@ export default function KeysPage() {
       });
 
       setNewKey('');
-      setNewKeyName(''); // Reset name state
+      setNewKeyName('');
+      setNewKeyDailyRateLimit(''); // Reset daily rate limit state
       onClose();
       fetchKeys();
     } catch (err: any) {
@@ -174,6 +180,16 @@ export default function KeysPage() {
                 placeholder="e.g., My Test Key"
                 value={newKeyName}
                 onChange={(e) => setNewKeyName(e.target.value)}
+              />
+            </FormControl>
+            <FormControl mt={4}> {/* Add Daily Rate Limit input */}
+              <FormLabel>Daily Rate Limit (Optional)</FormLabel>
+              <Input
+                type="number" // Use number type for better input control
+                placeholder="e.g., 100 (leave empty for no limit)"
+                value={newKeyDailyRateLimit}
+                onChange={(e) => setNewKeyDailyRateLimit(e.target.value)}
+                min="0" // Prevent negative numbers
               />
             </FormControl>
           </ModalBody>

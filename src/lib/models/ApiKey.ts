@@ -1,297 +1,250 @@
-import fs from "fs/promises";
-import { join, dirname } from "path";
-import { mkdir } from "fs/promises";
+import { getDb } from '../db'; // Import the database connection function
+import { v4 as uuidv4 } from 'uuid'; // For generating IDs if needed
 
-// Define the data directory path
-const DATA_DIR = join(process.cwd(), "data");
-const KEYS_FILE = join(DATA_DIR, "keys.json");
-
-// Define the ApiKey interface
-interface ApiKeyData {
+// Define the ApiKey interface (matches the table schema)
+export interface ApiKeyData {
+  _id: string;
   key: string;
-  name?: string; // Add optional name field
+  name?: string | null; // Allow null from DB
   isActive: boolean;
   lastUsed: string | null;
-  rateLimitResetAt: string | null; // Existing field, maybe for global rate limits? Keep for now.
+  rateLimitResetAt: string | null;
   failureCount: number;
-  requestCount: number; // Total requests
-  _id: string;
-  dailyRateLimit?: number | null; // Max daily requests (null or undefined means no limit)
-  dailyRequestsUsed: number; // Requests used today
-  lastResetDate: string | null; // ISO date string when dailyRequestsUsed was last reset
-  isDisabledByRateLimit: boolean; // Flag if disabled due to daily limit
+  requestCount: number;
+  dailyRateLimit?: number | null; // Allow null from DB
+  dailyRequestsUsed: number;
+  lastResetDate: string | null;
+  isDisabledByRateLimit: boolean;
 }
 
-// Simple lock flag to prevent concurrent writes
-let isWriting = false;
-const MAX_WRITE_RETRIES = 5;
-const WRITE_RETRY_DELAY_MS = 100;
+// Helper to convert DB result (0/1) to boolean
+function dbToBoolean(value: any): boolean {
+  return value === 1;
+}
+
+// Helper to convert boolean to DB value (0/1)
+function booleanToDb(value: boolean): number {
+  return value ? 1 : 0;
+}
+
 
 export class ApiKey implements ApiKeyData {
+  _id: string;
   key: string;
-  name?: string; // Add optional name field
+  name?: string | null;
   isActive: boolean;
   lastUsed: string | null;
-  rateLimitResetAt: string | null; // Existing field
+  rateLimitResetAt: string | null;
   failureCount: number;
-  requestCount: number; // Total requests
-  _id: string;
+  requestCount: number;
   dailyRateLimit?: number | null;
   dailyRequestsUsed: number;
   lastResetDate: string | null;
   isDisabledByRateLimit: boolean;
 
-  constructor(data: Partial<ApiKeyData>) {
-    this.key = data.key || "";
-    this.name = data.name; // Initialize name
-    this.isActive = data.isActive ?? true;
-    this.lastUsed = data.lastUsed || null;
-    this.rateLimitResetAt = data.rateLimitResetAt || null; // Existing field
-    this.failureCount = data.failureCount ?? 0;
-    this.requestCount = data.requestCount ?? 0; // Total requests
-    this._id = data._id || Date.now().toString();
-    this.dailyRateLimit = data.dailyRateLimit === undefined ? null : data.dailyRateLimit; // Default to null if not provided
-    this.dailyRequestsUsed = data.dailyRequestsUsed ?? 0;
-    this.lastResetDate = data.lastResetDate || null;
-    this.isDisabledByRateLimit = data.isDisabledByRateLimit ?? false;
+  constructor(data: ApiKeyData) {
+    this._id = data._id;
+    this.key = data.key;
+    this.name = data.name;
+    this.isActive = data.isActive; // Booleans are handled directly in the class
+    this.lastUsed = data.lastUsed;
+    this.rateLimitResetAt = data.rateLimitResetAt;
+    this.failureCount = data.failureCount;
+    this.requestCount = data.requestCount;
+    this.dailyRateLimit = data.dailyRateLimit;
+    this.dailyRequestsUsed = data.dailyRequestsUsed;
+    this.lastResetDate = data.lastResetDate;
+    this.isDisabledByRateLimit = data.isDisabledByRateLimit;
   }
 
-  static async #ensureDataDir() {
-    try {
-      await mkdir(DATA_DIR, { recursive: true });
-    } catch (error) {
-      // Directory already exists or other error
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw error;
-      }
+  // Static method to find one key by query object
+  static async findOne(query: Partial<ApiKeyData>): Promise<ApiKey | null> {
+    const db = await getDb();
+    // Build WHERE clause dynamically (simple example, needs more robust handling for complex queries)
+    let whereClause = 'WHERE 1=1';
+    const params: any[] = [];
+    if (query._id !== undefined) {
+      whereClause += ' AND _id = ?';
+      params.push(query._id);
     }
-  }
-
-  static #filterKey(key: ApiKeyData | null | undefined, query: any): boolean {
-    // Basic safety check: Ensure key is a valid object before accessing properties
-    if (!key || typeof key !== 'object') {
-        console.error("Skipping invalid key data in #filterKey:", key);
-        return false;
+    if (query.key !== undefined) {
+      whereClause += ' AND key = ?';
+      params.push(query.key);
     }
-    // --- Defensive checks for all accessed properties ---
-
-    // Check isActive condition
     if (query.isActive !== undefined) {
-        if (typeof key.isActive !== 'boolean' || key.isActive !== query.isActive) {
-            // console.warn(`Skipping key due to isActive mismatch or type issue: ID=${key._id}, isActive=${key.isActive}`);
-            return false;
-        }
+      whereClause += ' AND isActive = ?';
+      params.push(booleanToDb(query.isActive));
     }
+    // Add other query fields as needed...
 
-    // Check _id condition
-    if (query._id) {
-        if (typeof key._id !== 'string' || key._id !== query._id) {
-            // console.warn(`Skipping key due to _id mismatch or type issue: ID=${key._id}`);
-            return false;
-        }
-    }
+    const row = await db.get<ApiKeyData>(`SELECT * FROM api_keys ${whereClause}`, params);
 
-    // Check key condition
-    if (query.key) {
-         if (typeof key.key !== 'string' || key.key !== query.key) {
-            // console.warn(`Skipping key due to key value mismatch or type issue: ID=${key._id}`);
-            return false;
-         }
-    }
+    if (!row) return null;
 
-    // Check $or condition (rateLimitResetAt)
-    if (query.$or) {
-      const orConditionMet = query.$or.some((condition: any) => {
-        // Check for rateLimitResetAt === null condition
-        if (condition.rateLimitResetAt === null) {
-          // Check if key.rateLimitResetAt exists and is null
-          // Use hasOwnProperty for safer check on potentially incomplete objects
-          return Object.prototype.hasOwnProperty.call(key, 'rateLimitResetAt') && key.rateLimitResetAt === null;
-        }
-
-        // Check for rateLimitResetAt <= date condition
-        if (condition.rateLimitResetAt?.$lte) {
-          // Use hasOwnProperty for safer check
-          if (!Object.prototype.hasOwnProperty.call(key, 'rateLimitResetAt')) {
-              return false; // Field doesn't exist, cannot satisfy <= condition
-          }
-          const resetAt = key.rateLimitResetAt;
-          // If resetAt is explicitly null, it satisfies the condition (not rate limited)
-          if (resetAt === null) return true;
-          // If resetAt is a valid date string and is in the past or now
-          if (typeof resetAt === 'string') {
-            try {
-              // Add extra check for empty string which results in invalid date
-              if (resetAt.trim() === '') return false;
-              return new Date(resetAt) <= new Date();
-            } catch (e) {
-               console.error(`Invalid date format for rateLimitResetAt: "${resetAt}" for key ID: ${key._id || 'UNKNOWN'}`, e);
-               return false; // Treat invalid date as not meeting the condition
-            }
-          }
-          // If resetAt is not null and not a string, it doesn't meet the $lte condition
-          return false;
-        }
-        // If the condition in $or is not recognized, it's not met
-        return false;
-      });
-      // If none of the $or conditions were met, filter out the key
-      if (!orConditionMet) return false;
-    }
-
-    // If all checks passed, keep the key
-    return true;
-  }
-
-  static async findOne(query: any): Promise<ApiKey | null> {
-    const keys = await this.#readKeys();
-    const foundKey = keys.find((key) => this.#filterKey(key, query));
-    return foundKey ? new ApiKey(foundKey) : null;
-  }
-
-  static async findAll(query: any = {}): Promise<ApiKey[]> {
-    // Read keys only once
-    const rawKeys = await this.#readKeys();
-    const validKeys: ApiKey[] = [];
-
-    rawKeys
-      .filter((keyData) => this.#filterKey(keyData, query))
-      .forEach((keyData) => {
-        try {
-          // Attempt to instantiate the ApiKey
-          const apiKeyInstance = new ApiKey(keyData);
-          validKeys.push(apiKeyInstance);
-        } catch (instantiationError: any) {
-          // Log the error and the problematic data, then skip this key
-          console.error(`Error instantiating ApiKey with data: ${JSON.stringify(keyData)}`, instantiationError);
-          // Optionally use logError if available and configured for server-side logging
-          // logError(instantiationError, { context: 'ApiKey.findAll instantiation', problematicData: keyData });
-        }
-      });
-
-    return validKeys;
-  }
-
-  static async create(data: Partial<ApiKeyData>): Promise<ApiKey> {
-    const keys = await this.#readKeys();
-    const newKey = new ApiKey(data);
-    keys.push(newKey);
-    await this.#writeKeys(keys);
-    return newKey;
-  }
-
-  async save(): Promise<ApiKey> {
-    const keys = await ApiKey.#readKeys();
-    const index = keys.findIndex((k) => k._id === this._id);
-
-    if (index !== -1) {
-      keys[index] = this;
-    } else {
-      keys.push(this);
-    }
-
-    await ApiKey.#writeKeys(keys);
-    return this;
-  }
-
-  async delete(): Promise<void> {
-    const keys = await ApiKey.#readKeys();
-    const filteredKeys = keys.filter((k) => k._id !== this._id);
-    await ApiKey.#writeKeys(filteredKeys);
-  }
-
-  static async deleteById(id: string): Promise<boolean> {
-    const keys = await this.#readKeys();
-    const initialLength = keys.length;
-    const filteredKeys = keys.filter((k) => k._id !== id);
-
-    if (filteredKeys.length === initialLength) {
-      return false; // No key was deleted
-    }
-
-    await this.#writeKeys(filteredKeys);
-    return true;
-  }
-
-  static async bulkUpdate(updatedKeysMap: Map<string, ApiKey>): Promise<void> {
-    if (updatedKeysMap.size === 0) {
-      return; // Nothing to update
-    }
-
-    const allKeysData = await this.#readKeys();
-
-    // Merge the updates into the full list
-    const updatedAllKeysData = allKeysData.map((keyData) => {
-      const updatedKeyInstance = updatedKeysMap.get(keyData._id);
-      // If an updated instance exists in the map, use its data representation
-      // Otherwise, use the original data
-      return updatedKeyInstance ? { ...updatedKeyInstance } : keyData;
+    // Convert boolean fields from DB format
+    return new ApiKey({
+        ...row,
+        isActive: dbToBoolean(row.isActive),
+        isDisabledByRateLimit: dbToBoolean(row.isDisabledByRateLimit),
     });
-
-    // Write the entire updated list back
-    await this.#writeKeys(updatedAllKeysData);
   }
 
-  static async #readKeys(): Promise<ApiKeyData[]> {
-    try {
-      await this.#ensureDataDir();
-      const data = await fs.readFile(KEYS_FILE, "utf8");
-      try {
-        return JSON.parse(data);
-      } catch (parseError: any) {
-        console.error(`Error parsing JSON data in ${KEYS_FILE}:`, parseError);
-        console.error("Raw data:", data); // Log raw data for inspection
-        // Throw a more specific error or return empty array to prevent further issues
-        throw new Error(`Failed to parse keys data from ${KEYS_FILE}. Check file for corruption.`);
-        // Alternatively: return [];
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        // File doesn't exist, create it with empty array
-        await this.#writeKeys([]);
-        return [];
-      }
-      throw error;
+  // Static method to find all keys matching a query object
+  static async findAll(query: Partial<ApiKeyData> = {}): Promise<ApiKey[]> {
+    const db = await getDb();
+    // Build WHERE clause dynamically
+    let whereClause = 'WHERE 1=1';
+    const params: any[] = [];
+
+    if (query.isActive !== undefined) {
+      whereClause += ' AND isActive = ?';
+      params.push(booleanToDb(query.isActive));
     }
+    if (query.isDisabledByRateLimit !== undefined) {
+        whereClause += ' AND isDisabledByRateLimit = ?';
+        params.push(booleanToDb(query.isDisabledByRateLimit));
+    }
+    // Handle the $or condition for rateLimitResetAt specifically for keyManager usage
+    if ((query as any).$or && Array.isArray((query as any).$or)) {
+        const orConditions = (query as any).$or as any[];
+        const rateLimitConditions = orConditions
+            .map((cond: any) => {
+                if (cond.rateLimitResetAt === null) {
+                    return 'rateLimitResetAt IS NULL';
+                }
+                if (cond.rateLimitResetAt?.$lte) {
+                    params.push(cond.rateLimitResetAt.$lte);
+                    return 'rateLimitResetAt <= ?';
+                }
+                return null; // Ignore invalid conditions
+            })
+            .filter(c => c !== null);
+
+        if (rateLimitConditions.length > 0) {
+            whereClause += ` AND (${rateLimitConditions.join(' OR ')})`;
+        }
+    }
+    // Add other query fields as needed...
+
+    const rows = await db.all<ApiKeyData[]>(`SELECT * FROM api_keys ${whereClause}`, params);
+
+    return rows.map(row => new ApiKey({
+        ...row,
+        isActive: dbToBoolean(row.isActive),
+        isDisabledByRateLimit: dbToBoolean(row.isDisabledByRateLimit),
+    }));
   }
 
-  static async #writeKeys(keys: ApiKeyData[], retryCount = 0): Promise<void> {
-    if (isWriting) {
-      if (retryCount >= MAX_WRITE_RETRIES) {
-        throw new Error(`Failed to acquire write lock for ${KEYS_FILE} after ${MAX_WRITE_RETRIES} retries.`);
-      }
-      console.warn(`#writeKeys: Write lock active, retrying in ${WRITE_RETRY_DELAY_MS}ms (Attempt ${retryCount + 1})`);
-      await new Promise(resolve => setTimeout(resolve, WRITE_RETRY_DELAY_MS));
-      return this.#writeKeys(keys, retryCount + 1); // Retry the write
-    }
+  // Static method to create a new key
+  static async create(data: Partial<ApiKeyData>): Promise<ApiKey> {
+    const db = await getDb();
+    const newId = data._id || uuidv4(); // Generate ID if not provided
+    const keyData: ApiKeyData = {
+      _id: newId,
+      key: data.key || '',
+      name: data.name,
+      isActive: data.isActive ?? true,
+      lastUsed: data.lastUsed || null,
+      rateLimitResetAt: data.rateLimitResetAt || null,
+      failureCount: data.failureCount ?? 0,
+      requestCount: data.requestCount ?? 0,
+      dailyRateLimit: data.dailyRateLimit === undefined ? null : data.dailyRateLimit,
+      dailyRequestsUsed: data.dailyRequestsUsed ?? 0,
+      lastResetDate: data.lastResetDate || null,
+      isDisabledByRateLimit: data.isDisabledByRateLimit ?? false,
+    };
 
-    isWriting = true;
-    let tempFilePath: string | null = null; // Keep track of temp file path
+    if (!keyData.key) throw new Error("API key value cannot be empty");
 
+    await db.run(
+      `INSERT INTO api_keys (_id, key, name, isActive, lastUsed, rateLimitResetAt, failureCount, requestCount, dailyRateLimit, dailyRequestsUsed, lastResetDate, isDisabledByRateLimit)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      keyData._id,
+      keyData.key,
+      keyData.name,
+      booleanToDb(keyData.isActive),
+      keyData.lastUsed,
+      keyData.rateLimitResetAt,
+      keyData.failureCount,
+      keyData.requestCount,
+      keyData.dailyRateLimit,
+      keyData.dailyRequestsUsed,
+      keyData.lastResetDate,
+      booleanToDb(keyData.isDisabledByRateLimit)
+    );
+
+    return new ApiKey(keyData);
+  }
+
+  // Instance method to save (update) the current key
+  async save(): Promise<ApiKey> {
+    const db = await getDb();
+    await db.run(
+      `UPDATE api_keys
+       SET key = ?, name = ?, isActive = ?, lastUsed = ?, rateLimitResetAt = ?, failureCount = ?, requestCount = ?, dailyRateLimit = ?, dailyRequestsUsed = ?, lastResetDate = ?, isDisabledByRateLimit = ?
+       WHERE _id = ?`,
+      this.key,
+      this.name,
+      booleanToDb(this.isActive),
+      this.lastUsed,
+      this.rateLimitResetAt,
+      this.failureCount,
+      this.requestCount,
+      this.dailyRateLimit,
+      this.dailyRequestsUsed,
+      this.lastResetDate,
+      booleanToDb(this.isDisabledByRateLimit),
+      this._id
+    );
+    return this; // Return the instance
+  }
+
+  // Instance method to delete the current key
+  async delete(): Promise<void> {
+    const db = await getDb();
+    await db.run('DELETE FROM api_keys WHERE _id = ?', this._id);
+  }
+
+  // Static method to delete a key by ID
+  static async deleteById(id: string): Promise<boolean> {
+    const db = await getDb();
+    const result = await db.run('DELETE FROM api_keys WHERE _id = ?', id);
+    return result.changes !== undefined && result.changes > 0; // Return true if a row was deleted
+  }
+
+  // Static method for bulk updates (more efficient with DB)
+  // This implementation updates keys one by one, but within a transaction for atomicity.
+  // For very large updates, more optimized bulk SQL might be needed depending on the DB.
+  static async bulkUpdate(updatedKeysMap: Map<string, ApiKey>): Promise<void> {
+    if (updatedKeysMap.size === 0) return;
+
+    const db = await getDb();
     try {
-      await this.#ensureDataDir();
-      const dataToWrite = JSON.stringify(keys, null, 2);
-      // Use a temporary file and rename for atomicity (safer write)
-      tempFilePath = `${KEYS_FILE}.${Date.now()}.tmp`;
-      await fs.writeFile(tempFilePath, dataToWrite);
-      await fs.rename(tempFilePath, KEYS_FILE); // Atomic rename operation
-      // console.log(`#writeKeys: Successfully wrote ${KEYS_FILE}`); // Optional success log
-      tempFilePath = null; // Reset temp path on success
+      await db.run('BEGIN TRANSACTION');
+      for (const keyInstance of updatedKeysMap.values()) {
+        await db.run(
+          `UPDATE api_keys
+           SET key = ?, name = ?, isActive = ?, lastUsed = ?, rateLimitResetAt = ?, failureCount = ?, requestCount = ?, dailyRateLimit = ?, dailyRequestsUsed = ?, lastResetDate = ?, isDisabledByRateLimit = ?
+           WHERE _id = ?`,
+          keyInstance.key,
+          keyInstance.name,
+          booleanToDb(keyInstance.isActive),
+          keyInstance.lastUsed,
+          keyInstance.rateLimitResetAt,
+          keyInstance.failureCount,
+          keyInstance.requestCount,
+          keyInstance.dailyRateLimit,
+          keyInstance.dailyRequestsUsed,
+          keyInstance.lastResetDate,
+          booleanToDb(keyInstance.isDisabledByRateLimit),
+          keyInstance._id
+        );
+      }
+      await db.run('COMMIT');
     } catch (error) {
-       console.error(`Error during #writeKeys for ${KEYS_FILE}:`, error);
-       // Attempt to clean up temp file if it exists and wasn't successfully renamed
-       if (tempFilePath) {
-         try {
-           await fs.unlink(tempFilePath);
-           console.log(`Cleaned up temporary file: ${tempFilePath}`);
-         } catch (cleanupError) {
-            console.error(`Error cleaning up temporary file ${tempFilePath}:`, cleanupError);
-           // Ignore cleanup error or log differently
-         }
-       }
-       throw error; // Re-throw the original error
-    } finally {
-      isWriting = false; // Release the lock
+      await db.run('ROLLBACK'); // Rollback on error
+      console.error("Bulk update failed:", error);
+      throw error; // Re-throw the error
     }
   }
 }

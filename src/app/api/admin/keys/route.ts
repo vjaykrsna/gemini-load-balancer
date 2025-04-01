@@ -42,7 +42,7 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { key, name } = body; // Extract name as well
+    const { key, name, dailyRateLimit } = body; // Extract dailyRateLimit as well
 
     if (!key) {
       return NextResponse.json(
@@ -51,8 +51,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Pass key and name to the updated keyManager method
-    const newKey = await keyManager.addKey({ key, name });
+    // Validate dailyRateLimit (optional, must be number >= 0 or null/undefined)
+    let validatedRateLimit: number | null | undefined = undefined;
+    if (dailyRateLimit !== undefined && dailyRateLimit !== null) {
+        const numLimit = Number(dailyRateLimit);
+        if (!isNaN(numLimit) && numLimit >= 0) {
+            validatedRateLimit = numLimit;
+        } else if (String(dailyRateLimit).trim() === '') {
+             // Allow empty string to mean 'no limit' -> null
+             validatedRateLimit = null;
+        } else {
+            // Invalid non-numeric value provided
+            return NextResponse.json(
+                { error: "Invalid value provided for Daily Rate Limit. Must be a non-negative number or empty." },
+                { status: 400 }
+            );
+        }
+    } else if (dailyRateLimit === null) {
+        validatedRateLimit = null; // Explicitly allow null
+    }
+    // If undefined, it remains undefined, letting the backend assign default (which is null)
+
+    // Pass key, name, and validated dailyRateLimit to the keyManager method
+    const newKey = await keyManager.addKey({ key, name, dailyRateLimit: validatedRateLimit });
 
     // Mask the key for the response
     const maskedKey = {
