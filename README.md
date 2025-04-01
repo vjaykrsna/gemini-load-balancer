@@ -212,6 +212,90 @@ const configuration = {
 };
 ```
 
+## Upgrading from Previous Versions
+
+If you're upgrading from a version that used JSON files for storage (keys.json and settings.json) to this version which uses SQLite database, follow these steps to ensure a smooth upgrade:
+
+### Step 1: Update Your Code
+
+First, update your local repository to get the latest code:
+
+```bash
+# Navigate to your project directory
+cd path/to/gemini-load-balancer
+
+# Pull the latest changes from the repository
+git pull origin main
+
+# If you have local changes, you might need to stash them first:
+# git stash
+# git pull origin main
+# git stash pop
+```
+
+### Step 2: Install New Dependencies
+
+This version requires additional dependencies for SQLite database support. Install them using:
+
+```bash
+# Using Bun (recommended)
+bun install
+
+# OR using npm
+npm install --legacy-peer-deps
+```
+
+### Step 3: Run the Migration Script
+
+Now you need to migrate your existing data from JSON files to the SQLite database:
+
+```bash
+# Using Bun
+bun scripts/migrate-json-to-db.js
+
+# OR using Node.js
+node scripts/migrate-json-to-db.js
+```
+
+This script will:
+1. Read your existing data from `data/keys.json` and `data/settings.json`
+2. Migrate all data to the SQLite database (`data/database.db`)
+3. Preserve all your API keys, their statistics, and application settings
+4. Log the migration progress
+
+It's recommended to back up your `data` folder before migration. The script is safe to run multiple times as it will skip existing entries.
+
+### Step 4: Start the Updated Application
+
+After successful migration, start the application as usual:
+
+```bash
+# Development mode
+bun dev
+
+# OR production mode
+bun build
+bun start
+```
+
+The application will automatically use the database for all operations. The original JSON files will not be modified or deleted, but they will no longer be used.
+
+### Troubleshooting
+
+If you encounter any issues during migration:
+
+1. Check that the `data` directory has correct permissions
+2. Ensure your JSON files contain valid data
+3. Check the console output for specific error messages
+4. If migration fails, you can try again after fixing any issues
+
+For database issues after migration, you can check the database integrity:
+
+```bash
+# Using SQLite command line (if installed)
+sqlite3 data/database.db "PRAGMA integrity_check;"
+```
+
 ## Development
 
 ### Project Structure
