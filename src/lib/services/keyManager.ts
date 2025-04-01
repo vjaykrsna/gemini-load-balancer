@@ -29,7 +29,7 @@ class KeyManager {
   }
 
   // Internal rotateKey logic, now wrapped by getKey's mutex
-  private async _internalRotateKey(): Promise<string> {
+  private async _internalRotateKey(): Promise<{ key: string; id: string }> {
     // Note: This method assumes it's already being called within a mutex lock
     try {
       // Get a working key that's not in cooldown
@@ -126,7 +126,7 @@ class KeyManager {
         rotationType: 'scheduled'
       });
 
-      return key.key;
+      return { key: key.key, id: key._id };
     } catch (error: any) {
       logError(error, { action: 'rotateKey' });
       throw error;
@@ -228,7 +228,7 @@ class KeyManager {
     }); // End mutex runExclusive
   }
 
-  async getKey(): Promise<string> {
+  async getKey(): Promise<{ key: string; id: string }> {
     // Wrap the entire key getting/rotation logic in a mutex
     return await this.mutex.runExclusive(async () => {
       try {
@@ -285,7 +285,7 @@ class KeyManager {
               } else {
                  // --- Key is valid! ---
                  this.requestCounter++; // Increment request counter for rotation logic
-                 return this.currentKey.key;
+                 return { key: this.currentKey.key, id: this.currentKey._id };
               }
            }
         }

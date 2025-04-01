@@ -1,16 +1,9 @@
 export const dynamic = 'force-dynamic'; // Force dynamic rendering
 import { NextRequest, NextResponse } from 'next/server';
-import fs from 'fs/promises';
-import path from 'path';
 import { ApiKey } from '@/lib/models/ApiKey';
+import { RequestLogData } from '@/lib/models/RequestLog'; // Import RequestLogData
+import { getDb } from '@/lib/db'; // Import getDb
 import { logError } from '@/lib/services/logger';
-
-// Function to parse date from log filename
-function parseDateFromFilename(filename: string): Date | null {
-  const match = filename.match(/\d{4}-\d{2}-\d{2}/);
-  if (!match) return null;
-  return new Date(match[0]);
-}
 
 // Function to get date range based on timeRange parameter
 function getDateRange(timeRange: string): { startDate: Date, endDate: Date } {
@@ -77,267 +70,176 @@ function generateTimePeriods(startDate: Date, endDate: Date, timeRange: string):
 
 // Function to analyze log files and generate statistics
 async function generateStats(timeRange: string) {
-  const logsDir = path.join(process.cwd(), 'logs');
   // Dates for the main requestData chart based on selected timeRange
   const { startDate: requestStartDate, endDate: requestEndDate } = getDateRange(timeRange);
-  
+  const requestStartDateISO = requestStartDate.toISOString();
+  const requestEndDateISO = requestEndDate.toISOString();
+
   // Always calculate dates for the rolling 24-hour hourly chart, explicitly using UTC
   const hourlyEndDateUTC = new Date(); // Current time is the end point
   const hourlyStartDateUTC = new Date(hourlyEndDateUTC.getTime() - 24 * 60 * 60 * 1000); // Exactly 24 hours prior
-  
-  try {
-    // Get all keys from the database first
+  const hourlyStartDateISO = hourlyStartDateUTC.toISOString();
+  const hourlyEndDateISO = hourlyEndDateUTC.toISOString();
+
+  try { // Re-add the try block
+    const db = await getDb();
+    // Get all keys from the database first (still needed for lifetime total and key usage pie chart)
     const keys = await ApiKey.findAll({});
-
-    // Check if logs directory exists (still needed for errors, response times, model usage, historical charts)
-    let logsExist = true;
-    try {
-      await fs.access(logsDir);
-    } catch (error) {
-      logsExist = false;
-      console.warn("Logs directory not found. Stats relying on logs will be incomplete.");
-      // Don't return immediately, we can still calculate totals from DB
-    }
-    
-    // Get log files only if the directory exists
-    const allFiles = logsExist ? await fs.readdir(logsDir) : [];
-
-    // --- Determine required dates ---
-    const requiredDates = new Set<string>(); // Store dates as YYYY-MM-DD strings
-
-    // Add dates for the requestData range
-    let currentRequestDate = new Date(requestStartDate);
-    currentRequestDate.setHours(0, 0, 0, 0); // Start from the beginning of the day
-    while (currentRequestDate <= requestEndDate) {
-      requiredDates.add(currentRequestDate.toISOString().split('T')[0]);
-      currentRequestDate.setDate(currentRequestDate.getDate() + 1);
-    }
-
-    // Add dates for the hourlyData range (today and potentially yesterday) based on UTC window
-    requiredDates.add(hourlyStartDateUTC.toISOString().split('T')[0]);
-    requiredDates.add(hourlyEndDateUTC.toISOString().split('T')[0]);
-    // --- End Determine required dates ---
-
-    // --- Filter log files based on required dates ---
-    const requiredDateStrings = Array.from(requiredDates);
-
-    const requestLogFiles = allFiles.filter(file =>
-      file.startsWith('requests-') && requiredDateStrings.some(dateStr => file.includes(dateStr))
-    );
-    const errorLogFiles = allFiles.filter(file =>
-      file.startsWith('errors-') && requiredDateStrings.some(dateStr => file.includes(dateStr))
-    );
-    const keyLogFiles = allFiles.filter(file =>
-      file.startsWith('keys-') && requiredDateStrings.some(dateStr => file.includes(dateStr))
-    );
-    // --- End Filter log files ---
     
     // Initialize statistics
     // Calculate totals directly from DB data
     let totalRequests = keys.reduce((sum, key) => sum + (key.requestCount || 0), 0);
     let totalRequestsToday = keys.reduce((sum, key) => sum + (key.dailyRequestsUsed || 0), 0);
 
-    // Initialize stats derived from logs
-    let totalErrors = 0; // Overall errors from logs within the time range
-    let apiKeyErrors = 0; // Specific API key errors from logs within the time range
-    let responseTimesSum = 0;
-    let responseTimesCount = 0;
+    // Initialize stats derived from DB queries
+    let totalRequests24h = 0;
+    let totalErrors = 0;
+    let apiKeyErrors = 0;
+    let avgResponseTime = 0;
     
     // Generate time periods for charts
     const timePeriods = generateTimePeriods(requestStartDate, requestEndDate, timeRange); // Use request dates for requestData chart periods
     
     // Initialize request data with all time periods
-    // Initialize request data map with all time periods, including apiKeyErrors
+    // --- Database Queries for Stats ---
+
+    // 1. Total Requests (Last 24h)
+    const requests24hResult = await db.get<{ count: number }>(
+      `SELECT COUNT(*) as count FROM request_logs WHERE isError = 0 AND timestamp >= ? AND timestamp <= ?`,
+      hourlyStartDateISO, hourlyEndDateISO
+    );
+    totalRequests24h = requests24hResult?.count || 0;
+
+    // 2. Total Errors & API Key Errors (within selected timeRange)
+    const errorsResult = await db.get<{ total: number, api: number }>(
+      `SELECT
+         COUNT(*) as total,
+         SUM(CASE WHEN errorType = 'ApiKeyError' THEN 1 ELSE 0 END) as api
+       FROM request_logs
+       WHERE isError = 1 AND timestamp >= ? AND timestamp <= ?`,
+      requestStartDateISO, requestEndDateISO
+    );
+    totalErrors = errorsResult?.total || 0;
+    apiKeyErrors = errorsResult?.api || 0;
+
+    // 3. Average Response Time (within selected timeRange)
+    const avgTimeResult = await db.get<{ avg: number }>(
+      `SELECT AVG(responseTime) as avg
+       FROM request_logs
+       WHERE isError = 0 AND responseTime IS NOT NULL AND timestamp >= ? AND timestamp <= ?`,
+      requestStartDateISO, requestEndDateISO
+    );
+    avgResponseTime = avgTimeResult?.avg ? Math.round(avgTimeResult.avg) : 0;
+
+    // 4. Request Data (Grouped by period for chart)
+    let groupByFormat = '';
+    if (timeRange === '24h') {
+      groupByFormat = `strftime('%Y-%m-%d %H:00:00', timestamp)`; // Group by hour for 24h
+    } else {
+      groupByFormat = `strftime('%Y-%m-%d', timestamp)`; // Group by day otherwise
+    }
+    const requestDataDbResult = await db.all<any[]>(
+      `SELECT
+         ${groupByFormat} as period,
+         COUNT(*) as total_requests,
+         SUM(CASE WHEN isError = 1 THEN 1 ELSE 0 END) as errors,
+         SUM(CASE WHEN isError = 1 AND errorType = 'ApiKeyError' THEN 1 ELSE 0 END) as apiKeyErrors
+       FROM request_logs
+       WHERE timestamp >= ? AND timestamp <= ?
+       GROUP BY period
+       ORDER BY period ASC`,
+      requestStartDateISO, requestEndDateISO
+    );
+
+    // Map DB results to the expected chart format, filling gaps
     const requestDataMap = new Map<string, { name: string, requests: number, errors: number, apiKeyErrors: number, date: Date }>();
     timePeriods.forEach(date => {
       const name = formatDate(date, timeRange);
       requestDataMap.set(name, { name, requests: 0, errors: 0, apiKeyErrors: 0, date });
     });
-    
-    // Always initialize hourly map for the rolling 24-hour window using UTC hours
-    const hourlyMap = new Map<string, { hour: string, requests: number, timestamp: Date }>();
-    let currentUTCHourMarker = new Date(hourlyStartDateUTC);
-    // Align the marker to the start of the UTC hour it falls within
-    currentUTCHourMarker.setUTCMinutes(0, 0, 0);
 
-    // Generate 24 slots, representing the start of each UTC hour in the window
-    for (let i = 0; i < 24; i++) {
-      // Ensure we don't go past the end date if the window isn't exactly 24 hours due to DST changes etc.
-      if (currentUTCHourMarker > hourlyEndDateUTC) break;
+    requestDataDbResult.forEach(row => {
+      let nameToUpdate: string | null = null;
+      const periodDateUTC = new Date(row.period.replace(' ', 'T') + (timeRange === '24h' ? ':00Z' : 'T00:00:00Z')); // Parse UTC date from DB
 
-      const hourUTCSlotStart = new Date(currentUTCHourMarker);
-      // Use the UTC ISO string of the UTC hour start time as the unique key
-      const hourKey = hourUTCSlotStart.toISOString();
-      // Store the key and the Date object representing the start of the UTC slot
-      hourlyMap.set(hourKey, { hour: hourKey, requests: 0, timestamp: hourUTCSlotStart });
-      // Move marker to the start of the next UTC hour
-      currentUTCHourMarker.setUTCHours(currentUTCHourMarker.getUTCHours() + 1);
-    }
-    
-    // Model usage tracking
-    const modelUsage: Record<string, number> = {};
-    
-    // Key usage for pie chart will be derived directly from DB keys later
-    // const keyUsage: Record<string, { count: number, lastUsed: Date | null }> = {};
-
-    // Process request logs
-    for (const file of requestLogFiles) {
-      const filePath = path.join(logsDir, file);
-      let content = '';
-      
-      try {
-        content = await fs.readFile(filePath, 'utf-8');
-      } catch (error) {
-        console.error(`Error reading log file ${file}:`, error);
-        continue;
-      }
-      
-      // Parse log entries
-      const lines = content.split('\n').filter(Boolean);
-      
-      for (const line of lines) {
-        try {
-          const log = JSON.parse(line);
-          const timestamp = new Date(log.timestamp);
-
-          // Process for requestData chart if within its range
-          if (timestamp >= requestStartDate && timestamp <= requestEndDate) {
-            // Track model usage
-            let model = 'unknown';
-            if (log.body?.model) model = log.body.model;
-            else if (log.model) model = log.model;
-            else if (log.data?.model) model = log.data.model;
-            modelUsage[model] = (modelUsage[model] || 0) + 1;
-
-            // Track response times
-            if (log.message === 'Outgoing Response' && log.responseTime) {
-              responseTimesSum += log.responseTime;
-              responseTimesCount++;
-            }
-            // Note: Overall request counts and key usage (for pie chart) are now handled via DB.
-            // Log parsing is still needed for historical requestData chart.
-          }
-
-          // Process for hourlyData chart if within its UTC range
-          // Note: This check is primarily for completeness; actual incrementing happens in key logs processing
-          if (timestamp >= hourlyStartDateUTC && timestamp <= hourlyEndDateUTC) {
-             const logTimestampDate = new Date(timestamp); // Parse log timestamp
-             // Find the start of the UTC hour slot this log belongs to
-             const logUTCHourStartDate = new Date(logTimestampDate);
-             logUTCHourStartDate.setUTCMinutes(0, 0, 0); // Truncate to start of the UTC hour
-             // Generate the key using the UTC ISO string of that UTC start time
-             const logUTCHourKey = logUTCHourStartDate.toISOString();
-             // Check if the key exists (no incrementing here)
-             // if (hourlyMap.has(logUTCHourKey)) { }
-           }
-
-        } catch (e) {
-          // Skip invalid log entries
-          continue;
+      if (timeRange === '24h') {
+        // For 24h, the map keys are local "HH:00". Find the key matching the local hour of the UTC timestamp.
+        const localHourStr = periodDateUTC.getHours().toString().padStart(2, '0') + ':00';
+        if (requestDataMap.has(localHourStr)) {
+          nameToUpdate = localHourStr;
+        } else {
+           // Fallback or logging if needed - maybe the hour doesn't exist due to DST?
+           console.warn(`Local hour key ${localHourStr} derived from UTC period ${row.period} not found in requestDataMap.`);
+        }
+      } else {
+        // For other time ranges, use the existing formatDate logic (assuming it works)
+        const name = formatDate(periodDateUTC, timeRange); // Note: formatDate might need adjustment for non-24h UTC dates too, but focusing on 24h per user feedback
+        if (requestDataMap.has(name)) {
+           nameToUpdate = name;
         }
       }
-    }
-    
-    // Process error logs
-    for (const file of errorLogFiles) {
-      const filePath = path.join(logsDir, file);
-      let content = '';
-      
-      try {
-        content = await fs.readFile(filePath, 'utf-8');
-      } catch (error) {
-        console.error(`Error reading log file ${file}:`, error);
-        continue;
+
+      if (nameToUpdate) {
+        const entry = requestDataMap.get(nameToUpdate)!;
+        entry.requests = row.total_requests - row.errors; // Store successful requests
+        entry.errors = row.errors;
+        entry.apiKeyErrors = row.apiKeyErrors;
       }
-      
-      // Parse log entries
-      const lines = content.split('\n').filter(Boolean);
-      
-      for (const line of lines) {
-        try {
-          const log = JSON.parse(line);
-          const timestamp = new Date(log.timestamp);
-
-          // Process for requestData chart if within its range
-          if (timestamp >= requestStartDate && timestamp <= requestEndDate) {
-            totalErrors++; // Increment total errors for the period
-
-            // Check if it's an API Key Error
-            const isApiKeyError = log.errorType === 'ApiKeyError' || log.message?.includes('API Key');
-            if (isApiKeyError) {
-              apiKeyErrors++;
-            }
-
-            // Group by formatted date for the error data chart
-            const formattedDate = formatDate(timestamp, timeRange);
-            const entry = requestDataMap.get(formattedDate);
-            if (entry) {
-              entry.errors++; // Increment total errors for the period
-              if (isApiKeyError) {
-                entry.apiKeyErrors++; // Increment specific API key errors for the period
-              }
-            }
-          }
-          // Note: Errors are not currently shown on the hourly chart.
-        } catch (e) {
-          // Count as error but skip invalid log entries for chart
-          totalErrors++;
-          continue;
-        }
-      }
-    }
-    
-    // Process key logs ONLY for historical charts (requestData, hourlyData)
-    // Totals and keyUsageData pie chart now come from DB
-    if (logsExist) { // Only process logs if the directory exists
-        for (const file of keyLogFiles) {
-            const filePath = path.join(logsDir, file);
-            let content = '';
-            try {
-                content = await fs.readFile(filePath, 'utf-8');
-            } catch (error) {
-                console.error(`Error reading log file ${file}:`, error);
-                continue;
-            }
-            const lines = content.split('\n').filter(Boolean);
-            for (const line of lines) {
-                try {
-                    const log = JSON.parse(line);
-                    const timestamp = new Date(log.timestamp);
-                    const isSuccess = log.message === 'Key Success';
-
-                    // Process for requestData chart (historical requests per period)
-                    if (isSuccess && timestamp >= requestStartDate && timestamp <= requestEndDate) {
-                        const formattedDate = formatDate(timestamp, timeRange);
-                        const entry = requestDataMap.get(formattedDate);
-                        if (entry) {
-                            entry.requests++;
-                        }
-                    }
-
-                    // Process for hourlyData chart (historical requests per hour - UTC)
-                    const logTimestampDate = new Date(timestamp);
-                    if (isSuccess && logTimestampDate >= hourlyStartDateUTC && logTimestampDate <= hourlyEndDateUTC) {
-                        const logUTCHourStartDate = new Date(logTimestampDate);
-                        logUTCHourStartDate.setUTCMinutes(0, 0, 0);
-                        const logUTCHourKey = logUTCHourStartDate.toISOString();
-                        if (hourlyMap.has(logUTCHourKey)) {
-                            hourlyMap.get(logUTCHourKey)!.requests++;
-                        }
-                    }
-                } catch (e) {
-                    continue; // Skip invalid log lines
-                }
-            }
-        }
-    }
-    // Note: totalRequests and totalRequestsToday are now calculated from DB data above
-
-    // Convert request data map to array and sort by date
-    // Convert request data map to array, including apiKeyErrors
+    });
     const requestData = Array.from(requestDataMap.values())
       .sort((a, b) => a.date.getTime() - b.date.getTime())
       .map(({ name, requests, errors, apiKeyErrors }) => ({ name, requests, errors, apiKeyErrors }));
+
+
+    // 5. Hourly Data (Last 24h UTC)
+    const hourlyDbResult = await db.all<{ hour: string, requests: number }[]>(
+      `SELECT
+         strftime('%Y-%m-%dT%H:00:00.000Z', timestamp) as hour,
+         COUNT(*) as requests
+       FROM request_logs
+       WHERE isError = 0 AND timestamp >= ? AND timestamp <= ?
+       GROUP BY hour
+       ORDER BY hour ASC`,
+      hourlyStartDateISO, hourlyEndDateISO
+    );
+
+    // Map DB results to the expected chart format, filling gaps
+    const hourlyMap = new Map<string, { hour: string, requests: number, timestamp: Date }>();
+    let currentUTCHourMarker = new Date(hourlyStartDateUTC);
+    currentUTCHourMarker.setUTCMinutes(0, 0, 0);
+    for (let i = 0; i < 24; i++) {
+      if (currentUTCHourMarker > hourlyEndDateUTC) break;
+      const hourUTCSlotStart = new Date(currentUTCHourMarker);
+      const hourKey = hourUTCSlotStart.toISOString();
+      hourlyMap.set(hourKey, { hour: hourKey, requests: 0, timestamp: hourUTCSlotStart });
+      currentUTCHourMarker.setUTCHours(currentUTCHourMarker.getUTCHours() + 1);
+    }
+    hourlyDbResult.forEach(row => {
+      if (hourlyMap.has(row.hour)) {
+        hourlyMap.get(row.hour)!.requests = row.requests;
+      }
+    });
+    const finalHourlyData = Array.from(hourlyMap.values())
+      .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+      .map(({ hour, requests }) => ({ hour, requests }));
+
+
+    // 6. Model Usage (within selected timeRange)
+    const modelUsageDbResult = await db.all<{ modelUsed: string, count: number }[]>(
+      `SELECT modelUsed, COUNT(*) as count
+       FROM request_logs
+       WHERE modelUsed IS NOT NULL AND timestamp >= ? AND timestamp <= ?
+       GROUP BY modelUsed
+       ORDER BY count DESC`,
+      requestStartDateISO, requestEndDateISO
+    );
+    const modelUsageData = modelUsageDbResult.map(row => ({ name: row.modelUsed, value: row.count }));
+
+    // --- End Database Queries ---
+
+    // Note: totalRequests and totalRequestsToday are now calculated from DB data above
+
+    // Note: requestData and finalHourlyData are now populated directly from DB queries above
 
     // Prepare key usage data for chart directly from DB key request counts
     const keyUsageData = keys
@@ -359,46 +261,49 @@ async function generateStats(timeRange: string) {
     //   })).filter(item => item.value > 0);
     // }
     
-    // Convert model usage to chart data format and sort by usage
-    const modelUsageData = Object.entries(modelUsage)
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value);
+    // Note: modelUsageData is now populated directly from DB query above
     
-    // Calculate success rate and average response time
-    // Calculate success rate based on DB totalRequests and log-based totalErrors
-    // Ensure totalErrors doesn't exceed totalRequests from DB for a valid rate
-    const validTotalErrors = Math.min(totalErrors, totalRequests);
-    const successRate = totalRequests > 0 ? ((totalRequests - validTotalErrors) / totalRequests) * 100 : 100;
-    const avgResponseTime = responseTimesCount > 0 ? Math.round(responseTimesSum / responseTimesCount) : 0;
+    // Calculate success rate based on DB query results for the timeRange
+    // Use total requests within the timeRange for calculation. Let's query that.
+    const totalRequestsTimeRangeResult = await db.get<{ count: number }>(
+        `SELECT COUNT(*) as count FROM request_logs WHERE timestamp >= ? AND timestamp <= ?`,
+        requestStartDateISO, requestEndDateISO
+    );
+    const totalRequestsTimeRange = totalRequestsTimeRangeResult?.count || 0;
+    const successRate = totalRequestsTimeRange > 0
+      ? ((totalRequestsTimeRange - totalErrors) / totalRequestsTimeRange) * 100
+      : 100;
+    // Note: avgResponseTime is already calculated from DB query above
     
-    // Always finalize hourlyData from the hourlyMap (rolling 24h)
-    const finalHourlyData = Array.from(hourlyMap.values())
-      .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
-      // Map to the structure expected by the frontend chart { hour: string, requests: number }
-      // The 'hour' field contains the ISO timestamp string
-      .map(({ hour, requests }) => ({ hour, requests }));
+    // Note: finalHourlyData is now populated directly from DB query above
 
     return {
-      totalRequests, // From DB
-      totalRequestsToday, // From DB
-      totalErrors,
-      apiKeyErrors, // From logs
-      successRate,
-      avgResponseTime, // From logs
-      requestData,
-      hourlyData: finalHourlyData, // From logs
-      keyUsageData, // From DB
-      modelUsageData // From logs
+      totalRequests, // Lifetime total from ApiKey table
+      totalRequestsToday, // Since midnight from ApiKey table
+      totalRequests24h, // Last 24h total from request_logs table
+      totalErrors, // Total errors in timeRange from request_logs
+      apiKeyErrors, // API Key errors in timeRange from request_logs
+      successRate, // Calculated from request_logs data for timeRange
+      avgResponseTime, // Calculated from request_logs data for timeRange
+      requestData, // Calculated from request_logs data for timeRange
+      hourlyData: finalHourlyData, // Calculated from request_logs data for last 24h UTC
+      keyUsageData, // From ApiKey table
+      modelUsageData // Calculated from request_logs data for timeRange
     };
+  // } catch (error: any) { // Remove the duplicate catch block start
+  //   console.error('Error generating stats:', error);
+  //   // DB errors are caught below
   } catch (error: any) {
-    console.error('Error generating stats:', error);
-    // If logs directory doesn't exist yet, return empty stats
+    logError(error, { context: 'generateStats DB Query' });
+    console.error('Error generating stats from DB:', error);
+    // Return empty stats on DB error
     return createEmptyStats(requestStartDate, requestEndDate, timeRange);
   }
 }
 
 // Create empty stats object with proper time periods
 function createEmptyStats(startDate: Date, endDate: Date, timeRange: string) {
+  // Generate empty requestData structure based on time periods
   const timePeriods = generateTimePeriods(startDate, endDate, timeRange);
   const requestData = timePeriods.map(date => ({
     name: formatDate(date, timeRange),
@@ -406,6 +311,7 @@ function createEmptyStats(startDate: Date, endDate: Date, timeRange: string) {
     errors: 0,
     apiKeyErrors: 0
   }));
+
   // Always generate empty hourly data for the rolling 24h window
   const emptyHourlyData: { hour: string, requests: number }[] = [];
   const hourlyEndDate = new Date(); // Use current time as end
@@ -421,16 +327,17 @@ function createEmptyStats(startDate: Date, endDate: Date, timeRange: string) {
   }
   
   return {
-    totalRequests: 0,
+    totalRequests: 0,       // Lifetime (would ideally come from ApiKey query even on error, but default 0)
+    totalRequestsToday: 0,  // Since midnight (same as above)
+    totalRequests24h: 0,    // Last 24h
     totalErrors: 0,
     apiKeyErrors: 0,
     successRate: 100,
     avgResponseTime: 0,
-    requestData,
-    hourlyData: emptyHourlyData, // Use the generated empty data
-    keyUsageData: [],
-    modelUsageData: [],
-    totalRequestsToday: 0 // From DB
+    requestData,            // Empty structure based on time range
+    hourlyData: emptyHourlyData, // Empty structure for 24h
+    keyUsageData: [],       // Empty array
+    modelUsageData: []      // Empty array
   };
 }
 

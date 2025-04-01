@@ -4,7 +4,7 @@ import keyManager from '@/lib/services/keyManager';
 import { logError, requestLogger } from '@/lib/services/logger';
 import { readSettings } from '@/lib/settings'; // Import readSettings
 import { v4 as uuidv4 } from 'uuid';
-
+import { RequestLog } from '@/lib/models/RequestLog'; // Import RequestLog model
 // Helper function to handle streaming response
 async function handleStreamingResponse(axiosResponse: any, res: any) {
   const encoder = new TextEncoder();
@@ -56,8 +56,31 @@ export async function POST(req: NextRequest) {
   const requestId = uuidv4();
   const startTime = Date.now();
   
+  // Get client IP
+  const ipAddress = req.headers.get('x-forwarded-for') || req.ip;
+
   // Parse the request body
-  const body = await req.json();
+  let body: any;
+  try {
+    body = await req.json();
+  } catch (parseError: any) {
+    logError(parseError, { context: 'Chat completions - Body Parsing', requestId });
+    // Log to DB as well
+    await RequestLog.create({
+        apiKeyId: 'N/A', // No key involved yet
+        statusCode: 400,
+        isError: true,
+        errorType: 'InvalidRequestError',
+        errorMessage: 'Failed to parse request body: ' + parseError.message,
+        responseTime: Date.now() - startTime,
+        ipAddress: ipAddress || null,
+    }).catch(dbError => logError(dbError, { context: 'RequestLog DB Write Error' })); // Catch potential DB errors
+
+    return NextResponse.json(
+      { error: { message: 'Invalid request body', type: 'invalid_request_error' } },
+      { status: 400 }
+    );
+  }
   const isStreaming = body?.stream === true;
 
   // Log incoming request
@@ -70,15 +93,18 @@ export async function POST(req: NextRequest) {
     streaming: isStreaming
   });
 
+  let apiKeyIdForAttempt: string | null = null; // Store the ID used for the current attempt
+
   while (retryCount < maxRetries) {
     try {
       // Get the current key or rotate if needed
-      const currentKey = await keyManager.getKey();
+      const { key: currentKeyValue, id: currentKeyId } = await keyManager.getKey();
+      apiKeyIdForAttempt = currentKeyId; // Store ID for potential error logging
       
       const axiosConfig: any = {
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${currentKey}`,
+          'Authorization': `Bearer ${currentKeyValue}`,
         }
       };
 
@@ -98,13 +124,17 @@ export async function POST(req: NextRequest) {
 
       // Log successful response
       const responseTime = Date.now() - startTime;
-      requestLogger.info('Outgoing Response', {
-        requestId,
+      // Log success to DB
+      await RequestLog.create({
+        apiKeyId: apiKeyIdForAttempt, // Use the ID from this attempt
         statusCode: 200,
-        responseTime,
-        model: body?.model,
-        streaming: isStreaming
-      });
+        isError: false,
+        modelUsed: body?.model,
+        responseTime: responseTime,
+        ipAddress: ipAddress || null,
+      }).catch(dbError => logError(dbError, { context: 'RequestLog DB Write Error' })); // Catch potential DB errors
+
+      // File logging for successful response removed (now logged to DB)
 
       // Handle streaming response differently
       if (isStreaming) {
@@ -127,19 +157,34 @@ export async function POST(req: NextRequest) {
       }
 
       // Determine if it's an API key related error
-      const statusCode = error.response?.status;
+      const responseTime = Date.now() - startTime;
+      const statusCode = error.response?.status || 500; // Default to 500 if no response status
       const isApiKeyError = statusCode === 401 || statusCode === 403 || statusCode === 429;
+      let errorType = 'UpstreamError'; // Default error type
+      if (isApiKeyError) {
+        errorType = 'ApiKeyError';
+      } else if (statusCode >= 500) {
+        errorType = 'UpstreamServerError';
+      } else if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+        errorType = 'UpstreamTimeoutError';
+      }
 
-      logError(error, {
-        context: 'Chat completions',
-        requestId,
-        retryCount,
-        statusCode: statusCode,
-        streaming: isStreaming,
-        responseTime: Date.now() - startTime,
-        model: body?.model,
-        ...(isApiKeyError && { errorType: 'ApiKeyError' }) // Add errorType if it's an API key error
-      });
+      // File logging for standard errors removed (now logged to DB)
+      // We still log the final "Max Retries Exceeded" error to file below.
+
+      // Log error to DB (only if not retrying or if it's the last retry attempt)
+      if (!((isRateLimit || statusCode >= 500) && retryCount < maxRetries - 1)) {
+        await RequestLog.create({
+          apiKeyId: apiKeyIdForAttempt || 'UNKNOWN', // Use ID or fallback
+          statusCode: statusCode,
+          isError: true,
+          errorType: errorType,
+          errorMessage: error.response?.data?.error?.message || error.message,
+          modelUsed: body?.model,
+          responseTime: responseTime,
+          ipAddress: ipAddress || null,
+        }).catch(dbError => logError(dbError, { context: 'RequestLog DB Write Error' })); // Catch potential DB errors
+      }
 
       // For non-streaming requests, send error response
       return NextResponse.json(
@@ -154,7 +199,31 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // This should never be reached, but TypeScript requires a return
+  // If loop finishes due to max retries, log the final error
+  const finalResponseTime = Date.now() - startTime;
+  logError(new Error('Maximum retries exceeded'), {
+    context: 'Chat completions - Max Retries',
+    requestId,
+    retryCount,
+    statusCode: 500,
+    streaming: isStreaming,
+    responseTime: finalResponseTime,
+    model: body?.model,
+    errorType: 'MaxRetriesExceeded'
+  });
+
+  // Log final failure to DB
+  await RequestLog.create({
+    apiKeyId: apiKeyIdForAttempt || 'UNKNOWN', // Use ID or fallback
+    statusCode: 500,
+    isError: true,
+    errorType: 'MaxRetriesExceeded',
+    errorMessage: 'Maximum retries exceeded after multiple upstream failures.',
+    modelUsed: body?.model,
+    responseTime: finalResponseTime,
+    ipAddress: ipAddress || null,
+  }).catch(dbError => logError(dbError, { context: 'RequestLog DB Write Error' })); // Catch potential DB errors
+
   return NextResponse.json(
     {
       error: {

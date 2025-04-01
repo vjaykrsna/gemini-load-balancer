@@ -87,6 +87,28 @@ async function initializeDatabase(): Promise<Database> {
     console.log('Initialized default settings in the database.');
   }
 
+  // Create request_logs table if it doesn't exist
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS request_logs (
+      _id TEXT PRIMARY KEY,
+      apiKeyId TEXT NOT NULL,
+      timestamp TEXT NOT NULL, -- ISO 8601 format string
+      modelUsed TEXT,
+      responseTime INTEGER, -- Milliseconds
+      statusCode INTEGER NOT NULL,
+      isError BOOLEAN NOT NULL DEFAULT FALSE,
+      errorType TEXT,
+      errorMessage TEXT,
+      ipAddress TEXT,
+      FOREIGN KEY (apiKeyId) REFERENCES api_keys(_id) ON DELETE CASCADE -- Optional: Enforce FK and cascade deletes
+    );
+  `);
+
+  // Create indexes for faster querying
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_request_logs_timestamp ON request_logs (timestamp);`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_request_logs_apiKeyId ON request_logs (apiKeyId);`);
+
+
   console.log(`Database initialized successfully at ${DB_FILE}`);
   return db;
 }

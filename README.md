@@ -19,6 +19,7 @@ Thanks to @SannidhyaSah for his contribution to this application
 - **Responsive Design**: Works seamlessly on desktop and mobile devices
 - **Real-time Monitoring**: Live updates of key status and usage metrics
 - **Customizable Settings**: Configure key rotation, rate limits, and more
+- **Import/Export Keys**: Backup and restore your API keys via JSON files.
 
 ## Architecture
 
@@ -27,7 +28,7 @@ The Gemini Load Balancer is built using Next.js App Router, which allows for a u
 - **Frontend**: React with Chakra UI and Tailwind CSS for a responsive and accessible interface
 - **Backend**: Next.js API routes that proxy requests to the Gemini API
 - **State Management**: React Context API and SWR for efficient data fetching
-- **Data Storage**: SQLite database (`data/database.db`) for API keys and settings. File-based storage for logs.
+- **Data Storage**: SQLite database (`data/database.db`) for API keys, settings, and detailed request logs (`request_logs` table). File-based storage for supplementary debugging logs (incoming requests, errors, key events). Statistics are primarily derived from the database.
 - **Styling**: Chakra UI with Tailwind CSS for a consistent design system
 - **Error Handling**: Comprehensive error logging and monitoring
 - **Type Safety**: Full TypeScript implementation
@@ -226,10 +227,12 @@ gemini-load-balancer/
 ├── src/                         # Source code
 │   ├── app/                     # Next.js App Router
 │   │   ├── api/                 # API routes
-│   │   │   ├── admin/keys/      # Admin API endpoints
-│   │   │   ├── logs/            # Logs API endpoint
+│   │   │   ├── admin/           # Admin API endpoints
+│   │   │   │   ├── keys/        # Key management (CRUD, Import, Export)
+│   │   │   │   └── cleanup-logs/ # Log cleanup endpoint
+│   │   │   ├── logs/            # Logs API endpoint (for viewing file logs)
 │   │   │   ├── settings/        # Settings API endpoint
-│   │   │   ├── stats/           # Statistics API endpoint
+│   │   │   ├── stats/           # Statistics API endpoint (DB-driven)
 │   │   │   └── v1/              # Gemini API proxy endpoints
 │   │   ├── dashboard/           # Dashboard page
 │   │   ├── keys/                # Key management page
@@ -241,7 +244,7 @@ gemini-load-balancer/
 │   ├── contexts/                # React contexts
 │   ├── hooks/                   # Custom React hooks
 │   └── lib/                     # Library code
-│       ├── models/              # Data models
+│       ├── models/              # Data models (ApiKey, RequestLog, etc.)
 │       ├── services/            # Services
 │       └── utils/               # Utility functions
 ```
