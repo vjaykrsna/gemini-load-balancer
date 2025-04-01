@@ -195,14 +195,14 @@ export default function SettingsPage() {
     }
   };
 
-  // Handler for triggering key export
-  const handleExportKeys = () => {
-    // Simply navigate to the export endpoint, browser handles download
-    window.location.href = '/api/admin/keys/export';
+  // Handler for triggering full data export
+  const handleExportData = () => {
+    // Simply navigate to the new data export endpoint
+    window.location.href = '/api/admin/data/export';
   };
 
-  // Handler for importing keys
-  const handleImportKeys = useCallback(async () => {
+  // Handler for importing full data (OVERWRITES EXISTING DATA)
+  const handleImportData = useCallback(async () => {
     if (!selectedFile) {
       toast({
         title: 'No file selected',
@@ -222,7 +222,7 @@ export default function SettingsPage() {
     formData.append('file', selectedFile);
 
     try {
-      const response = await fetch('/api/admin/keys/import', {
+      const response = await fetch('/api/admin/data/import', {
         method: 'POST',
         body: formData, // Send as FormData
       });
@@ -230,14 +230,15 @@ export default function SettingsPage() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || data.message || 'Key import failed');
+        throw new Error(data.error || data.message || 'Data import failed');
       }
 
       setImportResult({ message: data.message, details: data }); // Store full result details
       toast({
-        title: 'Import Successful',
-        description: `${data.added} keys added, ${data.updated} updated, ${data.skipped} skipped.`,
-        status: 'success',
+        title: 'Data Import Complete',
+        // Adjust description based on the new API response structure if needed
+        description: data.message || `Import finished. Keys: ${data.results?.keys}, Settings: ${data.results?.settings}, Logs: ${data.results?.logs}. Errors: ${data.results?.errors?.length || 0}`,
+        status: data.results?.errors?.length > 0 ? 'warning' : 'success',
         duration: 7000, // Longer duration to read details
         isClosable: true,
       });
@@ -247,8 +248,8 @@ export default function SettingsPage() {
       setImportResult({ message: `Error: ${err.message}` });
       setError(`Import Error: ${err.message}`); // Show error specifically
       toast({
-        title: 'Key Import Failed',
-        description: err.message || 'Could not import keys from file.',
+        title: 'Data Import Failed',
+        description: err.message || 'Could not import data from file.',
         status: 'error',
         duration: 5000,
         isClosable: true,
@@ -440,32 +441,39 @@ export default function SettingsPage() {
        {/* Import/Export Card */}
        <Card bg={cardBg} borderWidth="1px" borderColor={borderColor} borderRadius="lg" shadow="sm" mb={6}>
          <CardHeader>
-           <Heading size="md">Import/Export API Keys</Heading>
+           <Heading size="md">Backup & Restore Data</Heading>
          </CardHeader>
          <Divider borderColor={borderColor} />
          <CardBody>
            <SimpleGrid columns={{ base: 1, md: 2 }} gap={6}>
              {/* Export Section */}
              <Box>
-               <Heading size="sm" mb={2}>Export Keys</Heading>
+               <Heading size="sm" mb={2}>Backup All Data</Heading>
                <Text fontSize="sm" color="gray.500" mb={3}>
-                 Download all current API keys as a JSON file. This includes configuration but not usage statistics.
+                 Download a JSON file containing all API Keys, Settings, and Request Log history. Useful for backups or migration.
                </Text>
                <Button
                  leftIcon={<FiDownload />}
                  colorScheme="green"
                  variant="outline"
-                 onClick={handleExportKeys}
+                 onClick={handleExportData}
                >
-                 Export All Keys
+                 Backup All Data
                </Button>
              </Box>
 
              {/* Import Section */}
              <Box>
-               <Heading size="sm" mb={2}>Import Keys</Heading>
+               <Heading size="sm" mb={2}>Restore Data from Backup</Heading>
+               <Alert status="warning" mb={3} borderRadius="md" fontSize="sm">
+                 <AlertIcon boxSize="16px" />
+                 <Box>
+                   <AlertTitle fontSize="sm">Warning!</AlertTitle>
+                   <AlertDescription>Restoring will **overwrite** all current API Keys, Settings, and Request Logs with the content from the backup file.</AlertDescription>
+                 </Box>
+               </Alert>
                <Text fontSize="sm" color="gray.500" mb={3}>
-                 Upload a JSON file containing API keys. Existing keys (matched by ID or key value) will be updated (name, active status, rate limit); others will be added. Usage stats are NOT imported.
+                 Upload a previously exported JSON backup file.
                </Text>
                <FormControl>
                  <FormLabel htmlFor="import-file-input" srOnly>Select JSON file</FormLabel>
@@ -483,13 +491,13 @@ export default function SettingsPage() {
                    leftIcon={<FiUpload />}
                    colorScheme="blue"
                    variant="outline"
-                   onClick={handleImportKeys}
+                   onClick={handleImportData}
                    isLoading={isImporting}
-                   loadingText="Importing..."
+                   loadingText="Restoring..."
                    isDisabled={!selectedFile || isImporting}
                    size="sm"
                  >
-                   Import Keys from File
+                   Restore from File
                  </Button>
                </FormControl>
                {importResult && (
@@ -499,9 +507,12 @@ export default function SettingsPage() {
                    </Text>
                    {importResult.details && (
                      <Text fontSize="xs" mt={1}>
-                       Added: {importResult.details.added}, Updated: {importResult.details.updated}, Skipped: {importResult.details.skipped}, Errors: {importResult.details.errors}
-                       {importResult.details.errors > 0 && (
-                         <Tooltip label={importResult.details.errorDetails?.join('\n') ?? 'No details'} placement="top">
+                       Keys: {importResult.details?.results?.keys ?? 'N/A'},
+                       Settings: {importResult.details?.results?.settings ?? 'N/A'},
+                       Logs: {importResult.details?.results?.logs ?? 'N/A'},
+                       Errors: {importResult.details?.results?.errors?.length ?? 0}
+                       {importResult.details?.results?.errors?.length > 0 && (
+                         <Tooltip label={importResult.details.results.errors.join('\n')} placement="top">
                            <Text as="span" ml={1} textDecoration="underline" cursor="help">(details)</Text>
                          </Tooltip>
                        )}
