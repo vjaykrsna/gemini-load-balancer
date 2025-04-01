@@ -37,34 +37,58 @@ function getDateRange(timeRange: string): { startDate: Date, endDate: Date } {
   return { startDate, endDate };
 }
 
-// Format date for display in charts
+// Format date for display in charts (Frontend will handle 24h formatting)
 function formatDate(date: Date, timeRange: string): string {
-  if (timeRange === '24h') {
-    // Use 24-hour format HH:00 for chronological string sorting
-    const hour = date.getHours().toString().padStart(2, '0');
-    return `${hour}:00`;
-  } else if (timeRange === '7d') {
+  // Removed 24h formatting logic - handled by frontend now
+  // Corrected duplicate '7d' condition
+  if (timeRange === '7d') {
     return date.toLocaleDateString('en-US', { weekday: 'short', day: 'numeric' });
-  } else {
+  } else { // Handles '30d', '90d', and any other defaults
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   }
 }
 
-// Generate time periods for chart based on timeRange
+// Generate time periods for chart based on timeRange, ensuring UTC for 24h
 function generateTimePeriods(startDate: Date, endDate: Date, timeRange: string): Date[] {
   const periods: Date[] = [];
-  let current = new Date(startDate);
-  
-  while (current <= endDate) {
-    periods.push(new Date(current));
-    
-    if (timeRange === '24h') {
-      current.setHours(current.getHours() + 1);
-    } else {
-      current.setDate(current.getDate() + 1);
+  let current: Date;
+
+  if (timeRange === '24h') {
+    // Use UTC hours for 24h range
+    // Start from the beginning of the hour for the startDate (in UTC)
+    current = new Date(startDate.toISOString());
+    current.setUTCMinutes(0, 0, 0);
+    const finalEndDateUTC = new Date(endDate.toISOString());
+
+    // Ensure the loop doesn't run excessively if dates are weird
+    let safetyCounter = 0;
+    while (current <= finalEndDateUTC && safetyCounter < 48) { // Added safety break
+      periods.push(new Date(current)); // Store Date object representing UTC hour start
+      current.setUTCHours(current.getUTCHours() + 1); // Increment UTC hour
+      safetyCounter++;
     }
+     if (safetyCounter >= 48) {
+        console.warn("generateTimePeriods 24h loop exceeded safety limit");
+     }
+  } else {
+    // Use local date for daily ranges
+    current = new Date(startDate);
+    current.setHours(0, 0, 0, 0); // Align to start of day
+    const finalEndDate = new Date(endDate);
+    finalEndDate.setHours(23, 59, 59, 999); // Ensure end date is inclusive
+
+    // Ensure the loop doesn't run excessively
+    let safetyCounter = 0;
+    while (current <= finalEndDate && safetyCounter < 180) { // Added safety break (e.g., 90 days + buffer)
+      periods.push(new Date(current));
+      current.setDate(current.getDate() + 1);
+      safetyCounter++;
+    }
+     if (safetyCounter >= 180) {
+        console.warn("generateTimePeriods daily loop exceeded safety limit");
+     }
   }
-  
+
   return periods;
 }
 
@@ -152,43 +176,98 @@ async function generateStats(timeRange: string) {
     );
 
     // Map DB results to the expected chart format, filling gaps
-    const requestDataMap = new Map<string, { name: string, requests: number, errors: number, apiKeyErrors: number, date: Date }>();
+    // Use UTC ISO string keys for 24h, local 'YYYY-MM-DD' keys for daily
+    const requestDataMap = new Map<string, { timestamp: string, name: string, requests: number, errors: number, apiKeyErrors: number, date: Date }>();
+
+    // Initialize map with generated periods.
     timePeriods.forEach(date => {
-      const name = formatDate(date, timeRange);
-      requestDataMap.set(name, { name, requests: 0, errors: 0, apiKeyErrors: 0, date });
+      let key: string;
+      let name: string = '';
+      let timestamp: string = '';
+
+      if (isNaN(date.getTime())) {
+        console.warn(`Invalid date generated in timePeriods: ${date}`);
+        return; // Skip invalid dates
+      }
+
+      if (timeRange === '24h') {
+        // Key is UTC ISO string for 24h
+        key = date.toISOString();
+        timestamp = key; // Store the ISO string for the frontend
+      } else {
+        // Key is local 'YYYY-MM-DD' for daily ranges
+        // Format date parts manually to ensure local YYYY-MM-DD
+        const year = date.getFullYear();
+        const month = (date.getMonth() + 1).toString().padStart(2, '0'); // Month is 0-indexed
+        const day = date.getDate().toString().padStart(2, '0');
+        key = `${year}-${month}-${day}`;
+        name = formatDate(date, timeRange); // Format name for display
+      }
+      requestDataMap.set(key, { timestamp, name, requests: 0, errors: 0, apiKeyErrors: 0, date });
     });
 
     requestDataDbResult.forEach(row => {
-      let nameToUpdate: string | null = null;
-      const periodDateUTC = new Date(row.period.replace(' ', 'T') + (timeRange === '24h' ? ':00Z' : 'T00:00:00Z')); // Parse UTC date from DB
+      // `row.period` is the UTC period string from the DB ('YYYY-MM-DD HH:00:00' or 'YYYY-MM-DD')
+      let keyToUpdate: string | null = null;
 
-      if (timeRange === '24h') {
-        // For 24h, the map keys are local "HH:00". Find the key matching the local hour of the UTC timestamp.
-        const localHourStr = periodDateUTC.getHours().toString().padStart(2, '0') + ':00';
-        if (requestDataMap.has(localHourStr)) {
-          nameToUpdate = localHourStr;
+      try {
+        if (timeRange === '24h') {
+          // For 24h, match using UTC ISO string keys
+          const periodDateUTC = new Date(row.period.replace(' ', 'T') + 'Z'); // Parse DB period as UTC
+          if (!isNaN(periodDateUTC.getTime())) {
+            const isoKey = periodDateUTC.toISOString(); // Convert to ISO string to match map key
+            if (requestDataMap.has(isoKey)) {
+              keyToUpdate = isoKey;
+            }
+            // else { console.warn(`24h: Map key ${isoKey} not found for DB period ${row.period}`); }
+          } else {
+            console.warn(`24h: Could not parse DB period ${row.period} as valid date.`);
+          }
         } else {
-           // Fallback or logging if needed - maybe the hour doesn't exist due to DST?
-           console.warn(`Local hour key ${localHourStr} derived from UTC period ${row.period} not found in requestDataMap.`);
+          // For daily, match using local 'YYYY-MM-DD' keys
+          // The DB `row.period` is already in 'YYYY-MM-DD' format (from strftime)
+          const dateKey = row.period;
+          if (requestDataMap.has(dateKey)) {
+            keyToUpdate = dateKey;
+          }
+          // else { console.warn(`Daily: Map key ${dateKey} not found for DB period ${row.period}`); }
+        }
+      } catch (e) {
+        console.error(`Error processing DB period ${row.period}:`, e);
+        return; // Skip this row on error
+      }
+
+
+      if (keyToUpdate) {
+        const entry = requestDataMap.get(keyToUpdate);
+        // Ensure entry exists before trying to update it
+        if (entry) {
+            // Ensure row values are numbers
+            const totalRequests = Number(row.total_requests) || 0;
+            const errors = Number(row.errors) || 0;
+            const apiKeyErrors = Number(row.apiKeyErrors) || 0;
+
+            entry.requests = totalRequests - errors; // Store successful requests
+            entry.errors = errors;
+            entry.apiKeyErrors = apiKeyErrors;
+        } else {
+             // This case should ideally not happen if keyToUpdate is derived from map keys
+             console.warn(`Entry not found for key ${keyToUpdate} derived from period ${row.period}`);
         }
       } else {
-        // For other time ranges, use the existing formatDate logic (assuming it works)
-        const name = formatDate(periodDateUTC, timeRange); // Note: formatDate might need adjustment for non-24h UTC dates too, but focusing on 24h per user feedback
-        if (requestDataMap.has(name)) {
-           nameToUpdate = name;
-        }
-      }
-
-      if (nameToUpdate) {
-        const entry = requestDataMap.get(nameToUpdate)!;
-        entry.requests = row.total_requests - row.errors; // Store successful requests
-        entry.errors = row.errors;
-        entry.apiKeyErrors = row.apiKeyErrors;
+         // Log if a DB result didn't match any generated period key (can be noisy, uncomment if needed)
+         // console.warn(`DB result period "${row.period}" did not match any key in the generated time periods map.`);
       }
     });
+
+    // Prepare final array, sending timestamp for 24h and name for others
     const requestData = Array.from(requestDataMap.values())
-      .sort((a, b) => a.date.getTime() - b.date.getTime())
-      .map(({ name, requests, errors, apiKeyErrors }) => ({ name, requests, errors, apiKeyErrors }));
+      .sort((a, b) => a.date.getTime() - b.date.getTime()) // Sort by original Date object
+      .map(({ timestamp, name, requests, errors, apiKeyErrors }) =>
+        timeRange === '24h'
+          ? { timestamp, requests, errors, apiKeyErrors } // Send timestamp for 24h
+          : { name, requests, errors, apiKeyErrors } // Send name for other ranges
+      );
 
 
     // 5. Hourly Data (Last 24h UTC)
