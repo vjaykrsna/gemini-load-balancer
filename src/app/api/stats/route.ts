@@ -86,16 +86,21 @@ async function generateStats(timeRange: string) {
   const hourlyStartDateUTC = new Date(hourlyEndDateUTC.getTime() - 24 * 60 * 60 * 1000); // Exactly 24 hours prior
   
   try {
-    // Check if logs directory exists
+    // Get all keys from the database first
+    const keys = await ApiKey.findAll({});
+
+    // Check if logs directory exists (still needed for errors, response times, model usage, historical charts)
+    let logsExist = true;
     try {
       await fs.access(logsDir);
     } catch (error) {
-      // If logs directory doesn't exist, return empty stats
-      return createEmptyStats(requestStartDate, requestEndDate, timeRange);
+      logsExist = false;
+      console.warn("Logs directory not found. Stats relying on logs will be incomplete.");
+      // Don't return immediately, we can still calculate totals from DB
     }
     
-    // Get all log files
-    const allFiles = await fs.readdir(logsDir);
+    // Get log files only if the directory exists
+    const allFiles = logsExist ? await fs.readdir(logsDir) : [];
 
     // --- Determine required dates ---
     const requiredDates = new Set<string>(); // Store dates as YYYY-MM-DD strings
@@ -128,12 +133,15 @@ async function generateStats(timeRange: string) {
     // --- End Filter log files ---
     
     // Initialize statistics
-    let totalRequests = 0;
-    let totalErrors = 0; // Overall errors
-    let apiKeyErrors = 0; // Specific API key errors
+    // Calculate totals directly from DB data
+    let totalRequests = keys.reduce((sum, key) => sum + (key.requestCount || 0), 0);
+    let totalRequestsToday = keys.reduce((sum, key) => sum + (key.dailyRequestsUsed || 0), 0);
+
+    // Initialize stats derived from logs
+    let totalErrors = 0; // Overall errors from logs within the time range
+    let apiKeyErrors = 0; // Specific API key errors from logs within the time range
     let responseTimesSum = 0;
     let responseTimesCount = 0;
-    let totalRequestsToday = 0; // Initialize today's request counter
     
     // Generate time periods for charts
     const timePeriods = generateTimePeriods(requestStartDate, requestEndDate, timeRange); // Use request dates for requestData chart periods
@@ -169,9 +177,9 @@ async function generateStats(timeRange: string) {
     // Model usage tracking
     const modelUsage: Record<string, number> = {};
     
-    // Key usage tracking with timestamps
-    const keyUsage: Record<string, { count: number, lastUsed: Date | null }> = {};
-    
+    // Key usage for pie chart will be derived directly from DB keys later
+    // const keyUsage: Record<string, { count: number, lastUsed: Date | null }> = {};
+
     // Process request logs
     for (const file of requestLogFiles) {
       const filePath = path.join(logsDir, file);
@@ -206,7 +214,8 @@ async function generateStats(timeRange: string) {
               responseTimesSum += log.responseTime;
               responseTimesCount++;
             }
-            // Note: Request counts and key usage (for pie chart) are handled via key logs.
+            // Note: Overall request counts and key usage (for pie chart) are now handled via DB.
+            // Log parsing is still needed for historical requestData chart.
           }
 
           // Process for hourlyData chart if within its UTC range
@@ -278,88 +287,51 @@ async function generateStats(timeRange: string) {
       }
     }
     
-    // Process key logs for more accurate key usage data
-    const todayStart = new Date(); // Get start of today
-    todayStart.setHours(0, 0, 0, 0);
-    for (const file of keyLogFiles) {
-      const filePath = path.join(logsDir, file);
-      let content = '';
-      
-      try {
-        content = await fs.readFile(filePath, 'utf-8');
-      } catch (error) {
-        console.error(`Error reading log file ${file}:`, error);
-        continue;
-      }
-      
-      // Parse log entries
-      const lines = content.split('\n').filter(Boolean);
-      
-      for (const line of lines) {
-        try {
-          const log = JSON.parse(line);
-          const timestamp = new Date(log.timestamp);
-
-          // Check if it's a 'Key Success' message to count as a request
-          const isSuccess = log.message === 'Key Success';
-
-          // Process for requestData chart if within its range
-          if (timestamp >= requestStartDate && timestamp <= requestEndDate) {
-            if (isSuccess) {
-              totalRequests++; // Increment total requests for the selected period
-
-              // Increment requests for the specific period in requestDataMap
-              const formattedDate = formatDate(timestamp, timeRange);
-              const entry = requestDataMap.get(formattedDate);
-              if (entry) {
-                entry.requests++;
-              }
+    // Process key logs ONLY for historical charts (requestData, hourlyData)
+    // Totals and keyUsageData pie chart now come from DB
+    if (logsExist) { // Only process logs if the directory exists
+        for (const file of keyLogFiles) {
+            const filePath = path.join(logsDir, file);
+            let content = '';
+            try {
+                content = await fs.readFile(filePath, 'utf-8');
+            } catch (error) {
+                console.error(`Error reading log file ${file}:`, error);
+                continue;
             }
+            const lines = content.split('\n').filter(Boolean);
+            for (const line of lines) {
+                try {
+                    const log = JSON.parse(line);
+                    const timestamp = new Date(log.timestamp);
+                    const isSuccess = log.message === 'Key Success';
 
-            // Track API key usage from key logs (for pie chart)
-            const keyIdentifier = log.keyId; // Declare keyIdentifier here
-            // Use 'Key Success' message to count usage for the pie chart
-            // Use 'Key Success' message to count usage for the pie chart
-            if (keyIdentifier && log.message === 'Key Success') {
-               if (!keyUsage[keyIdentifier]) {
-                   keyUsage[keyIdentifier] = { count: 0, lastUsed: null };
-               }
-               // Use the count from key logs for the pie chart
-               keyUsage[keyIdentifier].count++;
-               keyUsage[keyIdentifier].lastUsed = timestamp > (keyUsage[keyIdentifier].lastUsed || 0) ? timestamp : keyUsage[keyIdentifier].lastUsed;
+                    // Process for requestData chart (historical requests per period)
+                    if (isSuccess && timestamp >= requestStartDate && timestamp <= requestEndDate) {
+                        const formattedDate = formatDate(timestamp, timeRange);
+                        const entry = requestDataMap.get(formattedDate);
+                        if (entry) {
+                            entry.requests++;
+                        }
+                    }
+
+                    // Process for hourlyData chart (historical requests per hour - UTC)
+                    const logTimestampDate = new Date(timestamp);
+                    if (isSuccess && logTimestampDate >= hourlyStartDateUTC && logTimestampDate <= hourlyEndDateUTC) {
+                        const logUTCHourStartDate = new Date(logTimestampDate);
+                        logUTCHourStartDate.setUTCMinutes(0, 0, 0);
+                        const logUTCHourKey = logUTCHourStartDate.toISOString();
+                        if (hourlyMap.has(logUTCHourKey)) {
+                            hourlyMap.get(logUTCHourKey)!.requests++;
+                        }
+                    }
+                } catch (e) {
+                    continue; // Skip invalid log lines
+                }
             }
-          }
-
-          // Process for hourlyData chart if within its UTC range
-          const logTimestampDate = new Date(timestamp); // Parse log timestamp only once
-          if (isSuccess && logTimestampDate >= hourlyStartDateUTC && logTimestampDate <= hourlyEndDateUTC) {
-              // Find the start of the UTC hour slot this log belongs to
-              const logUTCHourStartDate = new Date(logTimestampDate);
-              logUTCHourStartDate.setUTCMinutes(0, 0, 0); // Truncate to start of the UTC hour
-
-              // Generate the key using the UTC ISO string of that UTC start time
-              const logUTCHourKey = logUTCHourStartDate.toISOString();
-
-              // Find the corresponding bucket in the map and increment
-              if (hourlyMap.has(logUTCHourKey)) {
-                hourlyMap.get(logUTCHourKey)!.requests++;
-              } else {
-                // This case might happen if a log timestamp is exactly on the boundary
-                // or if there are slight precision differences. Could be ignored or logged.
-                // console.warn(`Hourly map key not found for timestamp: ${timestamp}, generated UTC key: ${logUTCHourKey}`);
-              }
-            }
-
-          // Count requests for today specifically
-          if (isSuccess && timestamp >= todayStart) {
-            totalRequestsToday++;
-          }
-        } catch (e) {
-          // Skip invalid log entries
-          continue;
         }
-      }
     }
+    // Note: totalRequests and totalRequestsToday are now calculated from DB data above
 
     // Convert request data map to array and sort by date
     // Convert request data map to array, including apiKeyErrors
@@ -367,24 +339,17 @@ async function generateStats(timeRange: string) {
       .sort((a, b) => a.date.getTime() - b.date.getTime())
       .map(({ name, requests, errors, apiKeyErrors }) => ({ name, requests, errors, apiKeyErrors }));
 
-    // Get API keys for key usage statistics
-    const keys = await ApiKey.findAll({});
-    
-    // Prepare key usage data for chart
-    let keyUsageData = [];
-    for (const key of keys) {
-      // Use key._id for matching with keyUsage keys (assuming keyId logged is _id)
-      const usage = keyUsage[key._id] || { count: 0, lastUsed: null };
-      const maskedKey = `Key ${key._id.substring(0, 4)}...`;
-      
-      // Only include keys that have been used in the selected time range
-      if (usage.count > 0) {
-        keyUsageData.push({
-          name: key.name || maskedKey, // Use key.name if available, otherwise fallback to masked ID
-          value: usage.count
-        });
-      }
-    }
+    // Prepare key usage data for chart directly from DB key request counts
+    const keyUsageData = keys
+        .filter(key => (key.requestCount || 0) > 0) // Only include keys with usage
+        .map(key => {
+            const maskedKey = `Key ${key._id.substring(0, 4)}...`;
+            return {
+                name: key.name || maskedKey,
+                value: key.requestCount || 0 // Use total request count from DB
+            };
+        })
+        .sort((a, b) => b.value - a.value); // Sort by usage descending
     
     // Fallback logic removed - primary loop should now work correctly
     // if (keyUsageData.length === 0) {
@@ -400,7 +365,10 @@ async function generateStats(timeRange: string) {
       .sort((a, b) => b.value - a.value);
     
     // Calculate success rate and average response time
-    const successRate = totalRequests > 0 ? ((totalRequests - totalErrors) / totalRequests) * 100 : 100;
+    // Calculate success rate based on DB totalRequests and log-based totalErrors
+    // Ensure totalErrors doesn't exceed totalRequests from DB for a valid rate
+    const validTotalErrors = Math.min(totalErrors, totalRequests);
+    const successRate = totalRequests > 0 ? ((totalRequests - validTotalErrors) / totalRequests) * 100 : 100;
     const avgResponseTime = responseTimesCount > 0 ? Math.round(responseTimesSum / responseTimesCount) : 0;
     
     // Always finalize hourlyData from the hourlyMap (rolling 24h)
@@ -411,16 +379,16 @@ async function generateStats(timeRange: string) {
       .map(({ hour, requests }) => ({ hour, requests }));
 
     return {
-      totalRequests,
-      totalRequestsToday, // Add today's count
+      totalRequests, // From DB
+      totalRequestsToday, // From DB
       totalErrors,
-      apiKeyErrors,
+      apiKeyErrors, // From logs
       successRate,
-      avgResponseTime,
+      avgResponseTime, // From logs
       requestData,
-      hourlyData: finalHourlyData,
-      keyUsageData,
-      modelUsageData
+      hourlyData: finalHourlyData, // From logs
+      keyUsageData, // From DB
+      modelUsageData // From logs
     };
   } catch (error: any) {
     console.error('Error generating stats:', error);
@@ -462,7 +430,7 @@ function createEmptyStats(startDate: Date, endDate: Date, timeRange: string) {
     hourlyData: emptyHourlyData, // Use the generated empty data
     keyUsageData: [],
     modelUsageData: [],
-    totalRequestsToday: 0 // Add to empty stats
+    totalRequestsToday: 0 // From DB
   };
 }
 

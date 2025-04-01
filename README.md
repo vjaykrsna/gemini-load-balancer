@@ -27,14 +27,14 @@ The Gemini Load Balancer is built using Next.js App Router, which allows for a u
 - **Frontend**: React with Chakra UI and Tailwind CSS for a responsive and accessible interface
 - **Backend**: Next.js API routes that proxy requests to the Gemini API
 - **State Management**: React Context API and SWR for efficient data fetching
-- **Data Storage**: File-based storage for API keys and logs
+- **Data Storage**: SQLite database (`data/database.db`) for API keys and settings. File-based storage for logs.
 - **Styling**: Chakra UI with Tailwind CSS for a consistent design system
 - **Error Handling**: Comprehensive error logging and monitoring
 - **Type Safety**: Full TypeScript implementation
 
 ## Prerequisites
 
-- Node.js 18+ or Bun runtime
+- Node.js 18+ or Bun runtime (Recommended)
 - Git (for version control)
 - A Gemini API key (for testing)
 
@@ -83,7 +83,7 @@ REQUIRE_ADMIN_LOGIN=true
 MASTER_API_KEY=
 ```
 
-Note: Google Gemini API keys and rotation settings are managed through the UI (stored in `data/keys.json` and `data/settings.json` respectively), not directly in the `.env` file.
+Note: Google Gemini API keys and rotation settings are managed through the UI (stored in the `data/database.db` SQLite database), not directly in the `.env` file.
 
 ## Recommended Settings
 
@@ -121,7 +121,7 @@ For optimal performance and reliability, we recommend the following configuratio
 
 - Set log retention to 14-30 days to manage storage
 - Archive important logs before deletion
-- Regularly backup your keys.json and settings.json
+- Regularly backup your `data/database.db` file.
 - Clean up unused saved prompts periodically
 
 ## Running the Application
@@ -130,24 +130,23 @@ Development mode with hot reloading:
 
 ```bash
 # Using Bun
-bun run dev
-
-# Using npm
-npm run dev
+bun dev
+# OR (using explicit run command)
+# bun run dev
 ```
 
 Production deployment:
 
 ```bash
 # Build the application
-bun run build
-# OR
-npm run build
+bun build
+# OR (using explicit run command)
+# bun run build
 
 # Start the production server
-bun run start
-# OR
-npm run start
+bun start
+# OR (using explicit run command)
+# bun run start
 ```
 
 The application will be available at http://localhost:4269 (or your configured PORT)
@@ -158,7 +157,7 @@ Using PM2 for process management:
 # Ensure pm2 is installed globally (e.g., npm install -g pm2 or bun install -g pm2)
 
 # Start the application using pm2 with bun
-pm2 start bun --name gemini-load-balancer -- run start
+pm2 start bun --name gemini-load-balancer -- start
 
 # OR Start the application using pm2 with npm
 # pm2 start npm --name gemini-load-balancer -- run start
@@ -172,7 +171,7 @@ pm2 start bun --name gemini-load-balancer -- run start
 
 1. **API Key Protection**:
 
-   - Keys are stored encrypted in the data directory
+   - Keys are stored in the SQLite database (`data/database.db`). Ensure appropriate file system permissions for this file.
    - Keys are masked in the UI and logs
    - Access to the admin panel is protected by the `ADMIN_PASSWORD` set in the `.env` file. This password also encrypts sensitive data.
 
@@ -218,9 +217,11 @@ const configuration = {
 
 ```
 gemini-load-balancer/
-├── data/                        # Data storage
-│   └── keys.json                # API keys storage
-├── logs/                        # Log files
+├── data/                        # Data storage (ensure this directory is writable by the application)
+│   └── database.db            # SQLite database for keys and settings
+├── logs/                        # Log files (ensure this directory is writable)
+├── scripts/                     # Utility scripts
+│   └── migrate-json-to-db.js    # Script to migrate old JSON data to SQLite
 ├── public/                      # Static assets
 ├── src/                         # Source code
 │   ├── app/                     # Next.js App Router
@@ -260,7 +261,9 @@ To add new features to the Gemini Load Balancer:
 - **State Management**: React Context API + SWR for data fetching
 - **API Communication**: Built-in Next.js API routes + Axios for external calls
 - **Charts**: Recharts for usage statistics
-- **Package Manager**: Bun
+- **Database**: SQLite (via `sqlite` and `sqlite3` packages)
+- **Concurrency**: `async-mutex`
+- **Package Manager**: Bun (Recommended)
 - **Styling**: Chakra UI + Tailwind CSS
 - **Icons**: React Icons
 

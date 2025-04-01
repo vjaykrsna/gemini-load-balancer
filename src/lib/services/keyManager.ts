@@ -1,8 +1,7 @@
 import { ApiKey } from '../models/ApiKey';
 import { logKeyEvent, logError } from './logger';
-// Import readSettings - Adjust path if necessary, might need a shared utility
-// Assuming direct import works for now. If build issues arise, refactor needed.
 import { readSettings } from '@/lib/settings';
+import { Mutex } from 'async-mutex'; // Import Mutex
 
 // Helper function to check if two date objects represent the same day in the server's local timezone
 function isSameLocalDay(date1: Date | null, date2: Date | null): boolean {
@@ -15,25 +14,30 @@ function isSameLocalDay(date1: Date | null, date2: Date | null): boolean {
 }
 class KeyManager {
   private currentKey: ApiKey | null = null;
-  // rotationRequestCount removed, will be fetched dynamically
   private requestCounter: number = 0;
+  private mutex = new Mutex(); // Create a mutex instance
 
   constructor() {
     // Constructor no longer needs to set rotationRequestCount
   }
 
   async initialize() {
+    // Call getKey() which will handle initial rotation if needed
     if (!this.currentKey) {
-      await this.rotateKey();
+      await this.getKey();
     }
   }
 
-  async rotateKey(): Promise<string> {
+  // Internal rotateKey logic, now wrapped by getKey's mutex
+  private async _internalRotateKey(): Promise<string> {
+    // Note: This method assumes it's already being called within a mutex lock
     try {
       // Get a working key that's not in cooldown
       const now = new Date();
       const todayLocalString = now.toLocaleDateString('en-CA'); // YYYY-MM-DD format for local date
 
+      // Use 'as any' to bypass strict type checking for the $or clause,
+      // as the underlying ApiKey.findAll implementation handles this specific structure.
       let availableKeys = await ApiKey.findAll({
         isActive: true, // Must be generally active
         isDisabledByRateLimit: false, // Must not be disabled by daily limit
@@ -41,7 +45,7 @@ class KeyManager {
           { rateLimitResetAt: null },
           { rateLimitResetAt: { $lte: now.toISOString() } }
         ]
-      });
+      } as any); // <-- Type assertion added here
 
       // --- Daily Reset Logic ---
       let keysWereReset = false; // Flag to track if any key was updated
@@ -152,9 +156,13 @@ class KeyManager {
   }
 
   async markKeyError(error: any): Promise<boolean> {
-    if (!this.currentKey) return false;
+    // Acquire lock before potentially modifying currentKey
+    return await this.mutex.runExclusive(async () => {
+      if (!this.currentKey) return false;
 
-    try {
+      const keyToUpdate = this.currentKey; // Work with a stable reference inside the lock
+
+      try {
       // Check if it's a rate limit error
       if (error.response?.status === 429) {
         const resetTime = error.response.headers['x-ratelimit-reset'];
@@ -171,51 +179,59 @@ class KeyManager {
           resetTime: this.currentKey.rateLimitResetAt
         });
 
-        await this.currentKey.save();
-        // Clear current key to force rotation
-        this.currentKey = null;
+        await keyToUpdate.save();
+        // Clear current key ONLY if it's still the one we were working on
+        if (this.currentKey?._id === keyToUpdate._id) {
+            this.currentKey = null;
+        }
         return true; // Indicate it was a rate limit error
       }
 
-      this.currentKey.failureCount += 1;
+      keyToUpdate.failureCount += 1;
       
       // Fetch current settings to get the threshold
       const settings = await readSettings();
       const maxFailures = settings.maxFailureCount;
 
       // If too many failures, deactivate the key
-      if (this.currentKey.failureCount >= maxFailures) {
-        const keyToDeactivate = this.currentKey; // Store reference before clearing
-        keyToDeactivate.isActive = false;
+      if (keyToUpdate.failureCount >= maxFailures) {
+        keyToUpdate.isActive = false;
         
         logKeyEvent('Key Deactivated', {
-          keyId: keyToDeactivate._id,
+          keyId: keyToUpdate._id, // Corrected variable name
           reason: `Failure count reached threshold (${maxFailures})`,
-          failureCount: keyToDeactivate.failureCount
+          failureCount: keyToUpdate.failureCount
         });
 
-        // Save the deactivated state *before* clearing the current key
-        await keyToDeactivate.save();
-        
-        // Clear current key to force rotation
-        this.currentKey = null;
+        await keyToUpdate.save();
+        // Clear current key ONLY if it's still the one we were working on
+        if (this.currentKey?._id === keyToUpdate._id) {
+            this.currentKey = null;
+        }
       } else {
         // If not deactivated, save the incremented failure count
-        await this.currentKey.save();
+        // If not deactivated, save the incremented failure count
+        await keyToUpdate.save();
       }
       
       return false; // Indicate it was not a rate limit error
-    } catch (error: any) {
-      logError(error, { 
-        action: 'markKeyError',
-        keyId: this.currentKey?._id
-      });
+      } catch (error: any) {
+        logError(error, {
+          action: 'markKeyError',
+          keyId: keyToUpdate._id // Use the stable reference
+        });
+        // Ensure we still return false within the catch block
+        return false;
+      }
+      // Return false if it wasn't a rate limit error and didn't throw
       return false;
-    }
+    }); // End mutex runExclusive
   }
 
   async getKey(): Promise<string> {
-    try {
+    // Wrap the entire key getting/rotation logic in a mutex
+    return await this.mutex.runExclusive(async () => {
+      try {
       const now = new Date();
       const todayLocalString = now.toLocaleDateString('en-CA'); // YYYY-MM-DD format for local date
 
@@ -278,16 +294,21 @@ class KeyManager {
       // --- Rotation Needed ---
       // Either no current key, or one of the checks above failed/triggered rotation
       // Otherwise rotate to a new key
-      return await this.rotateKey();
-    } catch (error: any) {
-      logError(error, { action: 'getKey' });
-      throw error;
-    }
+      // Call the internal rotation logic which assumes lock is held
+      return await this._internalRotateKey();
+      } catch (error: any) {
+        logError(error, { action: 'getKey' });
+        throw error;
+      }
+    }); // End mutex runExclusive
   }
 
-  async addKey(data: { key: string, name?: string }): Promise<ApiKey> {
-    const { key, name } = data; // Destructure input
-    try {
+  async addKey(data: { key: string, name?: string, dailyRateLimit?: number | null }): Promise<ApiKey> {
+    // Although less critical, lock addKey to prevent potential race conditions
+    // if a rotation happens while adding/reactivating a key.
+    return await this.mutex.runExclusive(async () => {
+      const { key, name, dailyRateLimit } = data; // Destructure input, including dailyRateLimit
+      try {
       const existingKey = await ApiKey.findOne({ key });
       
       if (existingKey) {
@@ -306,17 +327,19 @@ class KeyManager {
         return existingKey;
       }
 
-      const newKey = await ApiKey.create({ key, name }); // Pass name to create
+      // Pass dailyRateLimit when creating the key
+      const newKey = await ApiKey.create({ key, name, dailyRateLimit });
       
       logKeyEvent('New Key Added', {
         keyId: newKey._id
       });
 
       return newKey;
-    } catch (error: any) {
-      logError(error, { action: 'addKey' });
-      throw error;
-    }
+      } catch (error: any) {
+        logError(error, { action: 'addKey' });
+        throw error;
+      }
+    }); // End mutex runExclusive
   }
 }
 

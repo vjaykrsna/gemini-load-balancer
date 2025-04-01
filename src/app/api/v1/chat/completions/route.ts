@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import axios from 'axios';
 import keyManager from '@/lib/services/keyManager';
 import { logError, requestLogger } from '@/lib/services/logger';
+import { readSettings } from '@/lib/settings'; // Import readSettings
 import { v4 as uuidv4 } from 'uuid';
 
 // Helper function to handle streaming response
@@ -47,7 +48,10 @@ export async function POST(req: NextRequest) {
   // relying on keyManager for outgoing requests).
   // --- End Master API Key Check ---
 
-  const maxRetries = 3;
+  // Fetch settings to get maxRetries
+  const settings = await readSettings();
+  const maxRetries = settings.maxRetries; // Use configured maxRetries
+
   let retryCount = 0;
   const requestId = uuidv4();
   const startTime = Date.now();
@@ -112,6 +116,11 @@ export async function POST(req: NextRequest) {
       const isRateLimit = await keyManager.markKeyError(error);
 
       // Only retry on rate limits or server errors
+      // Use the fetched maxRetries value in the condition
+      // Note: The loop condition is `retryCount < maxRetries`, so we retry as long as count is 0, 1, ..., maxRetries-1
+      // The check here should be if we have retries *left*, so check against maxRetries directly.
+      // If maxRetries is 3, we want to retry when retryCount is 0 or 1. We stop if retryCount becomes 2.
+      // So the condition should be `retryCount < maxRetries - 1`.
       if ((isRateLimit || error.response?.status >= 500) && retryCount < maxRetries - 1) {
         retryCount++;
         continue;
