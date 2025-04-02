@@ -60,7 +60,7 @@ const DEFAULT_STATE: PlaygroundState = {
     { role: "system", content: "You are a helpful assistant." },
     { role: "user", content: "Hello, how can you help me today?" },
   ],
-  model: "gemini-1.5-pro",
+  model: "gemini-2.0-flash",
   temperature: 0.7,
   maxTokens: 8192,
   stream: true,
@@ -74,9 +74,8 @@ export default function PlaygroundPage() {
   const [error, setError] = useState<string | null>(null);
   const [modelError, setModelError] = useState<string | null>(null);
   const [availableModels, setAvailableModels] = useState<string[]>([
-    "gemini-1.5-pro",
-    "gemini-1.5-flash",
-    "gemini-1.0-pro",
+    "gemini-2.0-flash",
+    "gemini-2.5-pro-exp-03-25",
   ]);
   const [savedStates, setSavedStates] = useState<
     { name: string; state: PlaygroundState }[]
