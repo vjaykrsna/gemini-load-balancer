@@ -1,8 +1,7 @@
 import { ApiKey } from '../models/ApiKey';
 import { logKeyEvent, logError } from './logger';
-// Import readSettings - Adjust path if necessary, might need a shared utility
-// Assuming direct import works for now. If build issues arise, refactor needed.
 import { readSettings } from '@/lib/settings';
+import { Mutex } from 'async-mutex'; // Import Mutex
 
 // Helper function to check if two date objects represent the same day in the server's local timezone
 function isSameLocalDay(date1: Date | null, date2: Date | null): boolean {
@@ -15,39 +14,38 @@ function isSameLocalDay(date1: Date | null, date2: Date | null): boolean {
 }
 class KeyManager {
   private currentKey: ApiKey | null = null;
-  // rotationRequestCount removed, will be fetched dynamically
   private requestCounter: number = 0;
+  private mutex = new Mutex(); // Create a mutex instance
 
   constructor() {
     // Constructor no longer needs to set rotationRequestCount
   }
 
   async initialize() {
+    // Call getKey() which will handle initial rotation if needed
     if (!this.currentKey) {
-      await this.rotateKey();
+      await this.getKey();
     }
   }
 
-  async rotateKey(): Promise<string> {
+  // Internal rotateKey logic, now wrapped by getKey's mutex
+  private async _internalRotateKey(): Promise<{ key: string; id: string }> {
+    // Note: This method assumes it's already being called within a mutex lock
     try {
       // Get a working key that's not in cooldown
       const now = new Date();
       const todayLocalString = now.toLocaleDateString('en-CA'); // YYYY-MM-DD format for local date
 
-      let availableKeys = await ApiKey.findAll({
-        isActive: true, // Must be generally active
-        isDisabledByRateLimit: false, // Must not be disabled by daily limit
-        $or: [ // Must not be in global rate limit cooldown
-          { rateLimitResetAt: null },
-          { rateLimitResetAt: { $lte: now.toISOString() } }
-        ]
+      // --- FIRST: Check ALL active keys for daily resets, even rate-limited ones ---
+      const allActiveKeys = await ApiKey.findAll({
+        isActive: true // Only filter for generally active keys
       });
 
       // --- Daily Reset Logic ---
       let keysWereReset = false; // Flag to track if any key was updated
       const updatedKeysMap = new Map<string, ApiKey>(); // Store updated keys by ID
 
-      for (const key of availableKeys) {
+      for (const key of allActiveKeys) {
         const lastReset = key.lastResetDate ? new Date(key.lastResetDate) : null;
         let needsUpdate = false;
 
@@ -71,16 +69,22 @@ class KeyManager {
             updatedKeysMap.set(key._id, key); // Store the updated key instance
         }
       }
+
       // If any keys were reset, perform a single bulk write
-      // If any keys were reset, perform a single bulk write using the new static method
       if (keysWereReset) {
           await ApiKey.bulkUpdate(updatedKeysMap);
-
-          // Update the 'availableKeys' list in memory to reflect the changes
-          // This avoids needing another full DB read right away
-          availableKeys = availableKeys.map(key => updatedKeysMap.get(key._id) || key);
       }
       // --- End Daily Reset Logic ---
+
+      // --- NOW: Get available keys for use (after potential resets) ---
+      let availableKeys = await ApiKey.findAll({
+        isActive: true, // Must be generally active
+        isDisabledByRateLimit: false, // Must not be disabled by daily limit
+        $or: [ // Must not be in global rate limit cooldown
+          { rateLimitResetAt: null },
+          { rateLimitResetAt: { $lte: now.toISOString() } }
+        ]
+      } as any); // <-- Type assertion added here
 
       if (availableKeys.length === 0) {
         const error = new Error('No available API keys (all active keys might be rate-limited or disabled)');
@@ -113,7 +117,7 @@ class KeyManager {
 
       this.currentKey = key;
       this.requestCounter = 0; // Reset counter on key rotation
-      
+
       // Log key rotation
       logKeyEvent('Key Rotation', {
         keyId: key._id,
@@ -122,7 +126,7 @@ class KeyManager {
         rotationType: 'scheduled'
       });
 
-      return key.key;
+      return { key: key.key, id: key._id };
     } catch (error: any) {
       logError(error, { action: 'rotateKey' });
       throw error;
@@ -137,7 +141,7 @@ class KeyManager {
         this.currentKey.requestCount += 1; // Increment total request count
         this.currentKey.dailyRequestsUsed += 1; // Increment daily request count
         await this.currentKey.save();
-        
+
         logKeyEvent('Key Success', {
           keyId: this.currentKey._id,
           lastUsed: this.currentKey.lastUsed,
@@ -152,9 +156,13 @@ class KeyManager {
   }
 
   async markKeyError(error: any): Promise<boolean> {
-    if (!this.currentKey) return false;
+    // Acquire lock before potentially modifying currentKey
+    return await this.mutex.runExclusive(async () => {
+      if (!this.currentKey) return false;
 
-    try {
+      const keyToUpdate = this.currentKey; // Work with a stable reference inside the lock
+
+      try {
       // Check if it's a rate limit error
       if (error.response?.status === 429) {
         const resetTime = error.response.headers['x-ratelimit-reset'];
@@ -165,13 +173,13 @@ class KeyManager {
         this.currentKey.rateLimitResetAt = resetTime
           ? new Date(resetTime * 1000).toISOString() // Use API provided reset time if available
           : new Date(Date.now() + fallbackCooldownMs).toISOString(); // Use configured fallback
-        
+
         logKeyEvent('Rate Limit Hit', {
           keyId: this.currentKey._id,
           resetTime: this.currentKey.rateLimitResetAt
         });
 
-        await this.currentKey.save();
+        await keyToUpdate.save();
 
         // --- Add delay before clearing currentKey to force rotation ---
         const delaySeconds = settings.keyRotationDelaySeconds || 0;
@@ -186,50 +194,58 @@ class KeyManager {
         }
         // --- End Delay ---
 
-        // Clear current key to force rotation
-        this.currentKey = null;
+        // Clear current key ONLY if it's still the one we were working on
+        if (this.currentKey?._id === keyToUpdate._id) {
+            this.currentKey = null;
+        }
         return true; // Indicate it was a rate limit error
       }
 
-      this.currentKey.failureCount += 1;
-      
+      keyToUpdate.failureCount += 1;
+
       // Fetch current settings to get the threshold
       const settings = await readSettings();
       const maxFailures = settings.maxFailureCount;
 
       // If too many failures, deactivate the key
-      if (this.currentKey.failureCount >= maxFailures) {
-        const keyToDeactivate = this.currentKey; // Store reference before clearing
-        keyToDeactivate.isActive = false;
-        
+      if (keyToUpdate.failureCount >= maxFailures) {
+        keyToUpdate.isActive = false;
+
         logKeyEvent('Key Deactivated', {
-          keyId: keyToDeactivate._id,
+          keyId: keyToUpdate._id, // Corrected variable name
           reason: `Failure count reached threshold (${maxFailures})`,
-          failureCount: keyToDeactivate.failureCount
+          failureCount: keyToUpdate.failureCount
         });
 
-        // Save the deactivated state *before* clearing the current key
-        await keyToDeactivate.save();
-        
-        // Clear current key to force rotation
-        this.currentKey = null;
+        await keyToUpdate.save();
+        // Clear current key ONLY if it's still the one we were working on
+        if (this.currentKey?._id === keyToUpdate._id) {
+            this.currentKey = null;
+        }
       } else {
         // If not deactivated, save the incremented failure count
-        await this.currentKey.save();
+        // If not deactivated, save the incremented failure count
+        await keyToUpdate.save();
       }
-      
+
       return false; // Indicate it was not a rate limit error
-    } catch (error: any) {
-      logError(error, { 
-        action: 'markKeyError',
-        keyId: this.currentKey?._id
-      });
+      } catch (error: any) {
+        logError(error, {
+          action: 'markKeyError',
+          keyId: keyToUpdate._id // Use the stable reference
+        });
+        // Ensure we still return false within the catch block
+        return false;
+      }
+      // Return false if it wasn't a rate limit error and didn't throw
       return false;
-    }
+    }); // End mutex runExclusive
   }
 
-  async getKey(): Promise<string> {
-    try {
+  async getKey(): Promise<{ key: string; id: string }> {
+    // Wrap the entire key getting/rotation logic in a mutex
+    return await this.mutex.runExclusive(async () => {
+      try {
       const now = new Date();
       const todayLocalString = now.toLocaleDateString('en-CA'); // YYYY-MM-DD format for local date
 
@@ -299,7 +315,7 @@ class KeyManager {
               } else {
                  // --- Key is valid! ---
                  this.requestCounter++; // Increment request counter for rotation logic
-                 return this.currentKey.key;
+                 return { key: this.currentKey.key, id: this.currentKey._id };
               }
            }
         }
@@ -308,18 +324,23 @@ class KeyManager {
       // --- Rotation Needed ---
       // Either no current key, or one of the checks above failed/triggered rotation
       // Otherwise rotate to a new key
-      return await this.rotateKey();
-    } catch (error: any) {
-      logError(error, { action: 'getKey' });
-      throw error;
-    }
+      // Call the internal rotation logic which assumes lock is held
+      return await this._internalRotateKey();
+      } catch (error: any) {
+        logError(error, { action: 'getKey' });
+        throw error;
+      }
+    }); // End mutex runExclusive
   }
 
-  async addKey(data: { key: string, name?: string }): Promise<ApiKey> {
-    const { key, name } = data; // Destructure input
-    try {
+  async addKey(data: { key: string, name?: string, dailyRateLimit?: number | null }): Promise<ApiKey> {
+    // Although less critical, lock addKey to prevent potential race conditions
+    // if a rotation happens while adding/reactivating a key.
+    return await this.mutex.runExclusive(async () => {
+      const { key, name, dailyRateLimit } = data; // Destructure input, including dailyRateLimit
+      try {
       const existingKey = await ApiKey.findOne({ key });
-      
+
       if (existingKey) {
         existingKey.isActive = true;
         existingKey.failureCount = 0; // Reset failure count
@@ -336,17 +357,19 @@ class KeyManager {
         return existingKey;
       }
 
-      const newKey = await ApiKey.create({ key, name }); // Pass name to create
-      
+      // Pass dailyRateLimit when creating the key
+      const newKey = await ApiKey.create({ key, name, dailyRateLimit });
+
       logKeyEvent('New Key Added', {
         keyId: newKey._id
       });
 
       return newKey;
-    } catch (error: any) {
-      logError(error, { action: 'addKey' });
-      throw error;
-    }
+      } catch (error: any) {
+        logError(error, { action: 'addKey' });
+        throw error;
+      }
+    }); // End mutex runExclusive
   }
 }
 

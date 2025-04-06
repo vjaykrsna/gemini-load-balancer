@@ -19,6 +19,7 @@ Thanks to @SannidhyaSah for his contribution to this application
 - **Responsive Design**: Works seamlessly on desktop and mobile devices
 - **Real-time Monitoring**: Live updates of key status and usage metrics
 - **Customizable Settings**: Configure key rotation, rate limits, and more
+- **Import/Export Keys**: Backup and restore your API keys via JSON files.
 
 ## Architecture
 
@@ -27,14 +28,14 @@ The Gemini Load Balancer is built using Next.js App Router, which allows for a u
 - **Frontend**: React with Chakra UI and Tailwind CSS for a responsive and accessible interface
 - **Backend**: Next.js API routes that proxy requests to the Gemini API
 - **State Management**: React Context API and SWR for efficient data fetching
-- **Data Storage**: File-based storage for API keys and logs
+- **Data Storage**: SQLite database (`data/database.db`) for API keys, settings, and detailed request logs (`request_logs` table). File-based storage for supplementary debugging logs (incoming requests, errors, key events). Statistics are primarily derived from the database.
 - **Styling**: Chakra UI with Tailwind CSS for a consistent design system
 - **Error Handling**: Comprehensive error logging and monitoring
 - **Type Safety**: Full TypeScript implementation
 
 ## Prerequisites
 
-- Node.js 18+ or Bun runtime
+- Node.js 18+ or Bun runtime (Recommended)
 - Git (for version control)
 - A Gemini API key (for testing)
 
@@ -83,7 +84,7 @@ REQUIRE_ADMIN_LOGIN=true
 MASTER_API_KEY=
 ```
 
-Note: Google Gemini API keys and rotation settings are managed through the UI (stored in `data/keys.json` and `data/settings.json` respectively), not directly in the `.env` file.
+Note: Google Gemini API keys and rotation settings are managed through the UI (stored in the `data/database.db` SQLite database), not directly in the `.env` file.
 
 ## Recommended Settings
 
@@ -121,7 +122,7 @@ For optimal performance and reliability, we recommend the following configuratio
 
 - Set log retention to 14-30 days to manage storage
 - Archive important logs before deletion
-- Regularly backup your keys.json and settings.json
+- Regularly backup your `data/database.db` file.
 - Clean up unused saved prompts periodically
 
 ## Running the Application
@@ -130,24 +131,23 @@ Development mode with hot reloading:
 
 ```bash
 # Using Bun
-bun run dev
-
-# Using npm
-npm run dev
+bun dev
+# OR (using explicit run command)
+# bun run dev
 ```
 
 Production deployment:
 
 ```bash
 # Build the application
-bun run build
-# OR
-npm run build
+bun build
+# OR (using explicit run command)
+# bun run build
 
 # Start the production server
-bun run start
-# OR
-npm run start
+bun start
+# OR (using explicit run command)
+# bun run start
 ```
 
 The application will be available at http://localhost:4269 (or your configured PORT)
@@ -158,7 +158,7 @@ Using PM2 for process management:
 # Ensure pm2 is installed globally (e.g., npm install -g pm2 or bun install -g pm2)
 
 # Start the application using pm2 with bun
-pm2 start bun --name gemini-load-balancer -- run start
+pm2 start bun --name gemini-load-balancer -- start
 
 # OR Start the application using pm2 with npm
 # pm2 start npm --name gemini-load-balancer -- run start
@@ -172,7 +172,7 @@ pm2 start bun --name gemini-load-balancer -- run start
 
 1. **API Key Protection**:
 
-   - Keys are stored encrypted in the data directory
+   - Keys are stored in the SQLite database (`data/database.db`). Ensure appropriate file system permissions for this file.
    - Keys are masked in the UI and logs
    - Access to the admin panel is protected by the `ADMIN_PASSWORD` set in the `.env` file. This password also encrypts sensitive data.
 
@@ -212,23 +212,111 @@ const configuration = {
 };
 ```
 
+## Upgrading from Previous Versions
+
+If you're upgrading from a version that used JSON files for storage (keys.json and settings.json) to this version which uses SQLite database, follow these steps to ensure a smooth upgrade:
+
+### Step 1: Update Your Code
+
+First, update your local repository to get the latest code:
+
+```bash
+# Navigate to your project directory
+cd path/to/gemini-load-balancer
+
+# Pull the latest changes from the repository
+git pull origin main
+
+# If you have local changes, you might need to stash them first:
+# git stash
+# git pull origin main
+# git stash pop
+```
+
+### Step 2: Install New Dependencies
+
+This version requires additional dependencies for SQLite database support. Install them using:
+
+```bash
+# Using Bun (recommended)
+bun install
+
+# OR using npm
+npm install --legacy-peer-deps
+```
+
+### Step 3: Run the Migration Script
+
+Now you need to migrate your existing data from JSON files to the SQLite database:
+
+```bash
+# Using Bun
+bun scripts/migrate-json-to-db.js
+
+# OR using Node.js
+node scripts/migrate-json-to-db.js
+```
+
+This script will:
+1. Read your existing data from `data/keys.json` and `data/settings.json`
+2. Migrate all data to the SQLite database (`data/database.db`)
+3. Preserve all your API keys, their statistics, and application settings
+4. Log the migration progress
+
+It's recommended to back up your `data` folder before migration. The script is safe to run multiple times as it will skip existing entries.
+
+### Step 4: Start the Updated Application
+
+After successful migration, start the application as usual:
+
+```bash
+# Development mode
+bun dev
+
+# OR production mode
+bun build
+bun start
+```
+
+The application will automatically use the database for all operations. The original JSON files will not be modified or deleted, but they will no longer be used.
+
+### Troubleshooting
+
+If you encounter any issues during migration:
+
+1. Check that the `data` directory has correct permissions
+2. Ensure your JSON files contain valid data
+3. Check the console output for specific error messages
+4. If migration fails, you can try again after fixing any issues
+
+For database issues after migration, you can check the database integrity:
+
+```bash
+# Using SQLite command line (if installed)
+sqlite3 data/database.db "PRAGMA integrity_check;"
+```
+
 ## Development
 
 ### Project Structure
 
 ```
 gemini-load-balancer/
-├── data/                        # Data storage
-│   └── keys.json                # API keys storage
-├── logs/                        # Log files
+├── data/                        # Data storage (ensure this directory is writable by the application)
+│   └── database.db            # SQLite database for keys and settings
+├── logs/                        # Log files (ensure this directory is writable)
+├── scripts/                     # Utility scripts
+│   └── migrate-json-to-db.js    # Script to migrate old JSON data to SQLite
 ├── public/                      # Static assets
 ├── src/                         # Source code
 │   ├── app/                     # Next.js App Router
 │   │   ├── api/                 # API routes
-│   │   │   ├── admin/keys/      # Admin API endpoints
-│   │   │   ├── logs/            # Logs API endpoint
+│   │   │   ├── admin/           # Admin API endpoints
+│   │   │   │   ├── keys/        # Key management (CRUD, Import, Export)
+│   │   │   │   └── cleanup-logs/ # Log cleanup endpoint
+│   │   │   ├── logs/            # Logs API endpoint (for viewing file logs)
 │   │   │   ├── settings/        # Settings API endpoint
-│   │   │   ├── stats/           # Statistics API endpoint
+│   │   │   ├── stats/           # Statistics API endpoint (DB-driven)
 │   │   │   └── v1/              # Gemini API proxy endpoints
 │   │   ├── dashboard/           # Dashboard page
 │   │   ├── keys/                # Key management page
@@ -240,7 +328,7 @@ gemini-load-balancer/
 │   ├── contexts/                # React contexts
 │   ├── hooks/                   # Custom React hooks
 │   └── lib/                     # Library code
-│       ├── models/              # Data models
+│       ├── models/              # Data models (ApiKey, RequestLog, etc.)
 │       ├── services/            # Services
 │       └── utils/               # Utility functions
 ```
@@ -260,7 +348,9 @@ To add new features to the Gemini Load Balancer:
 - **State Management**: React Context API + SWR for data fetching
 - **API Communication**: Built-in Next.js API routes + Axios for external calls
 - **Charts**: Recharts for usage statistics
-- **Package Manager**: Bun
+- **Database**: SQLite (via `sqlite` and `sqlite3` packages)
+- **Concurrency**: `async-mutex`
+- **Package Manager**: Bun (Recommended)
 - **Styling**: Chakra UI + Tailwind CSS
 - **Icons**: React Icons
 

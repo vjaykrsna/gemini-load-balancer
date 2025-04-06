@@ -277,15 +277,59 @@ export default function StatsPage() {
                               margin={{ top: 5, right: 30, left: 0, bottom: 5 }}
                             >
                               <CartesianGrid strokeDasharray="3 3" stroke={borderColor} />
-                              {/* XAxis uses the 'name' field directly, which is pre-formatted by the backend */}
-                              <XAxis dataKey="name" stroke={useColorModeValue("gray.600", "gray.400")} tick={{ fill: axisTickColor, fontSize: 12 }} />
-                              <YAxis stroke={useColorModeValue("gray.600", "gray.400")} tick={{ fill: axisTickColor, fontSize: 12 }}/>
-                              <RechartsTooltip
-                                contentStyle={{
-                                  backgroundColor: cardBg,
-                                  borderColor: borderColor,
-                                }}
-                              />
+                             {/* XAxis uses 'timestamp' for 24h (UTC ISO string) and 'name' otherwise */}
+                             <XAxis
+                              dataKey={timeRange === '24h' ? 'timestamp' : 'name'}
+                              stroke={useColorModeValue("gray.600", "gray.400")}
+                              tick={{ fill: axisTickColor, fontSize: 12 }}
+                              tickFormatter={(value) => {
+                                // If 24h range, format the ISO timestamp to local HH:00
+                                if (timeRange === '24h') {
+                                  try {
+                                    const date = new Date(value);
+                                    if (!isNaN(date.getTime())) {
+                                      // Format to local time HH:00
+                                      return date.toLocaleTimeString('en-US', {
+                                        hour: '2-digit',
+                                        minute: '2-digit',
+                                        hour12: false // Use 24-hour format
+                                      });
+                                    }
+                                  } catch (e) { /* ignore format errors */ }
+                                  return value; // Fallback to raw value on error
+                                }
+                                // Otherwise (7d, 30d, 90d), the value is already the formatted name
+                                return value;
+                              }}
+                              // Optional: Adjust interval for 24h if labels overlap
+                              // interval={timeRange === '24h' ? 'preserveStartEnd' : undefined}
+                             />
+                             <YAxis stroke={useColorModeValue("gray.600", "gray.400")} tick={{ fill: axisTickColor, fontSize: 12 }}/>
+                             <RechartsTooltip
+                               contentStyle={{
+                                 backgroundColor: cardBg,
+                                 borderColor: borderColor,
+                               }}
+                               labelFormatter={(label) => {
+                                 // Format the label in the tooltip based on range
+                                 if (timeRange === '24h') {
+                                   try {
+                                     const date = new Date(label); // Label is the timestamp ISO string
+                                     if (!isNaN(date.getTime())) {
+                                       // Show full local date and time in tooltip
+                                       return date.toLocaleString('en-US', {
+                                         dateStyle: 'short', // e.g., 4/1/25
+                                         timeStyle: 'short', // e.g., 13:00
+                                         hour12: false,
+                                       });
+                                     }
+                                   } catch (e) {}
+                                   return label; // Fallback
+                                 }
+                                 // For other ranges, label is already formatted name (e.g., "Mon 1", "Apr 1")
+                                 return label;
+                               }}
+                             />
                               <Legend />
                               <Line
                                 type="monotone"
